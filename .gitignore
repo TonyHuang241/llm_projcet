@@ -1,0 +1,7 @@
+data/
+output/
+
+# 敏感信息与缓存
+.env
+__pycache__/
+*.pyc
