@@ -37,7 +37,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PROMPT_FILE = ROOT / 'prompts' / 'mda_neutralize_prompt.md'
-SENTENCE_RE = re.compile(r'[^。！？；]+[。！？；]')  # 与 finbert_sentiment.py 的切句规则保持一致
+SENTENCE_RE = re.compile(r'[^。！？；]+[。！？；]')
 NUM_RE = re.compile(r'\d+(?:[.,]\d+)*')
 BATCH_SIZE = 100  # 每次调用改写的句数；实测到 160 句未见截断或语调变弱，按次计费时批次越大越省
 MAX_RETRIES = 4  # 同一批内容不合格时的重试次数，用尽后拆成两半

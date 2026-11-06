@@ -8,32 +8,24 @@ OUTPUT_DIR = Path(__file__).resolve().parent / 'output'  # 分析结果
 
 # ==================== 运行参数 ====================
 TASK = 'neutralize_llm'  # 要运行的功能，可选值见下方 TASKS
-YEAR = '2023'  # 情感分析使用哪一年的文本（提取的文本按年份存放在子文件夹中）
+YEAR = '2023'  # 中性化处理哪一年的文本（提取的文本按年份存放在子文件夹中）
 # 中性化时不按分析师覆盖筛选、全部保留的年报年份（分析师数据只到 2023-08，2024 年报要看的 2023 年数据不完整）
 KEEP_ALL_YEARS = {'2024'}
 # 中性化时读取清理后文本的年份（这几年提取的是整章“董事会报告”，见 src/clean_mda_scope.py）
 CLEAN_SCOPE_YEARS = {'2011', '2012', '2013', '2014'}
 
 
-def run_finbert_sentiment():
-    from src import finbert_sentiment  # 依赖 torch，只在用到时导入
-    finbert_sentiment.main(
-        audit_dir=DATA_DIR / 'audit_texts' / YEAR,
-        mda_dir=DATA_DIR / 'mda_texts' / YEAR,
-        out_path=OUTPUT_DIR / 'sentiment_analysis' / 'finbert_sentiment.csv',
-        limit=100,  # 分析前多少家公司（按文件名排序），None 表示全部
-    )
-
-
 def run_compare_neutral_tone():
     from src import compare_neutral_tone  # 依赖 torch，只在用到时导入
-    # 一次分析 mda_neutral_glm 下所有年份，结果合并到同一份文件；随时可以停止，重新运行自动跳过已完成的文章
+    # 一次分析 mda_neutral_glm.zip 中所有年份（不需要解压），结果合并到同一份文件；随时可以停止，重新运行自动跳过已完成的文章
     compare_neutral_tone.main(
-        neutral_root=DATA_DIR / 'mda_neutral_glm',
+        neutral_zip=DATA_DIR / 'mda_neutral_glm.zip',
         out_dir=OUTPUT_DIR / 'sentiment_analysis' / 'neutral_compare_glm_all',
         # 之前已分析过的结果（没有 year 列），导入后不再重新分析，原文件不会被修改
         legacy_dir=OUTPUT_DIR / 'sentiment_analysis' / 'neutral_compare_glm',
         legacy_year='2024',
+        years=None,  # 试跑时只分析哪些年份，如 ['2023']，None 表示全部
+        limit=None,  # 试跑时每年只分析前多少篇（按文件名排序），None 表示全部
     )
 
 
@@ -54,8 +46,6 @@ TASKS = {
         zip_path=DATA_DIR / 'annual_reports' / '2024_5405份.zip',
         out_dir=DATA_DIR / 'audit_texts',
     ),
-    # 用中文FinBERT对审计报告和MD&A做情感分析（GPU加速）
-    'finbert_sentiment': run_finbert_sentiment,
     # 比较MD&A中性化改写前后的FinBERT语调
     'compare_neutral_tone': run_compare_neutral_tone,
     # 调用大模型（.env 中配置）对MD&A逐句中性化改写，每篇文章一个并行任务

@@ -1,7 +1,9 @@
 """用中文FinBERT比较MD&A中性化改写前后的语调，所有年份的结果合并输出，支持断点续跑。
 
-输入：<neutral_root>/<年份>/*.json，每句含 original（原句）和 neutral（改写句），两者逐句对应。
-同一句的原句和改写句都用 finbert_sentiment 中的模型分类，再分别汇总成文档级指标。
+输入：压缩包 neutral_zip 中的 <顶层文件夹>/<年份>/*.json（不需要解压），每句含 original（原句）和 neutral（改写句），两者逐句对应。
+模型：yiyanghkust/finbert-tone-chinese（bert-base-chinese 在金融文本上微调），对单句分类：中性/正面/负面。
+同一句的原句和改写句都逐句分类（模型一次最多读512个token），再分别按文档汇总：
+各类句子的占比，以及净语调 tone = (正面句数 - 负面句数) / 全部句数，即正面占比 - 负面占比，取值 -1 ~ 1。
 输出（都在 out_dir 中，所有年份合在一起，用 year 列区分）：
   - tone_by_doc.csv：每篇文章改写前后的各项指标及差值
   - tone_by_sentence.csv：每句改写前后的类别和概率，便于查看具体哪些句子的语调变了
@@ -23,15 +25,16 @@ import math
 import os
 import statistics
 import time
+import zipfile
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from src.finbert_sentiment import LABELS, MODEL_NAME, classify, summarize
-
-LABEL_CN = {'neutral': '中性', 'positive': '正面', 'negative': '负面'}
+MODEL_NAME = 'yiyanghkust/finbert-tone-chinese'
+LABELS = ['neutral', 'positive', 'negative']  # 与模型 config 中 id2label 的顺序一致
+LABEL_CN ={'neutral': '中性', 'positive': '正面', 'negative': '负面'}
 METRICS = ['tone', 'pos_ratio', 'neg_ratio', 'neu_ratio', 'avg_pos_prob', 'avg_neg_prob']
 DOC_FIELDS = ['year', 'code', 'company', 'n_sentences'] + [
     f'{m}_{s}' for m in METRICS for s in ('orig', 'neutral', 'diff')]
@@ -39,6 +42,52 @@ SENT_FIELDS = ['year', 'code', 'id', 'label_orig', 'label_neutral', 'pos_orig', 
                'pos_neutral', 'neg_neutral', 'original', 'neutral']
 BOM = b'\xef\xbb\xbf'  # utf-8-sig：Excel 打开不乱码
 csv.field_size_limit(10 ** 9)  # 个别句子可能超过 csv 默认的字段长度上限
+
+
+def list_sources(zf):
+    """返回 {年份: {股票代码: 压缩包内的 JSON 路径}}。只取直接位于年份文件夹下的 JSON，txt、日志等都忽略。"""
+    sources = {}
+    for name in sorted(zf.namelist()):
+        p = PurePosixPath(name)
+        if p.suffix == '.json' and p.parent.name.isdigit():
+            sources.setdefault(p.parent.name, {})[p.name.split('_')[0]] = name
+    return dict(sorted(sources.items()))
+
+
+def load_pairs(zf, name):
+    return json.loads(zf.read(name).decode('utf-8'))
+
+
+@torch.no_grad()
+def classify(sentences, tokenizer, model, batch_size):
+    """返回每句的三类概率（顺序同LABELS）。先按长度排序再分批，减少padding、加快速度。"""
+    order = sorted(range(len(sentences)), key=lambda i: len(sentences[i]))
+    probs = [None] * len(sentences)
+    for k in range(0, len(order), batch_size):
+        idx = order[k:k + batch_size]
+        batch = tokenizer([sentences[i] for i in idx], padding=True, truncation=True,
+                          max_length=512, return_tensors='pt').to(model.device)
+        for i, row in zip(idx, model(**batch).logits.softmax(-1).tolist()):
+            probs[i] = row
+    return probs
+
+
+def summarize(probs):
+    """把逐句结果汇总成文档级指标。"""
+    n = len(probs)
+    counts = [0, 0, 0]
+    for row in probs:
+        counts[row.index(max(row))] += 1
+    neu, pos, neg = counts
+    return {
+        'n_sentences': n,
+        'pos_ratio': round(pos / n, 4),
+        'neg_ratio': round(neg / n, 4),
+        'neu_ratio': round(neu / n, 4),
+        'tone': round((pos - neg) / n, 4),
+        'avg_pos_prob': round(sum(row[1] for row in probs) / n, 4),
+        'avg_neg_prob': round(sum(row[2] for row in probs) / n, 4),
+    }
 
 
 def encode_rows(fields, rows, header=False):
@@ -106,7 +155,7 @@ class ResultStore:
             f.close()
 
 
-def import_legacy(store, legacy_dir, legacy_year, sources):
+def import_legacy(store, legacy_dir, legacy_year, sources, zf):
     """导入没有 year 列的旧结果。旧 CSV 中同一篇文章的句子是连续的，所以可以边读边按文章处理。"""
     doc_path, sent_path = Path(legacy_dir) / 'tone_by_doc.csv', Path(legacy_dir) / 'tone_by_sentence.csv'
     if not doc_path.exists() or not sent_path.exists():
@@ -123,7 +172,7 @@ def import_legacy(store, legacy_dir, legacy_year, sources):
             if code not in pending:
                 continue
             rows = list(group)
-            pairs = json.loads(paths[code].read_text(encoding='utf-8'))
+            pairs = load_pairs(zf, paths[code])
             if [(r['original'], r['neutral']) for r in rows] != [(p['original'], p['neutral']) for p in pairs]:
                 changed.append(code)  # 改写结果已变化，旧分析不再有效，留给后面重新分析
                 continue
@@ -133,10 +182,10 @@ def import_legacy(store, legacy_dir, legacy_year, sources):
           f'句子与当前 JSON 不一致、需要重新分析 {len(changed)} 篇{changed[:20] if changed else ""}', flush=True)
 
 
-def analyze(path, year, tokenizer, model, batch_size):
-    """分析一篇文章，返回 (文档行, 句子行列表)。"""
-    code, _, company = path.stem.split('_')[:3]
-    pairs = json.loads(path.read_text(encoding='utf-8'))
+def analyze(zf, name, year, tokenizer, model, batch_size):
+    """分析压缩包中的一篇文章，返回 (文档行, 句子行列表)。"""
+    code, _, company = PurePosixPath(name).stem.split('_')[:3]
+    pairs = load_pairs(zf, name)
     p_orig = classify([p['original'] for p in pairs], tokenizer, model, batch_size)
     p_neu = classify([p['neutral'] for p in pairs], tokenizer, model, batch_size)
     s_orig, s_neu = summarize(p_orig), summarize(p_neu)
@@ -198,34 +247,36 @@ def report(store):
         print(f'{LABEL_CN[a]:<8}' + ''.join(f'{trans[a, b]:>10}' for b in LABELS))
 
 
-def main(neutral_root, out_dir, legacy_dir=None, legacy_year=None, batch_size=64):
-    """neutral_root：其下每个以年份命名的子文件夹都会被分析（其他文件夹忽略）。
-    legacy_dir、legacy_year：已有的旧结果及其年份，None 表示没有。"""
-    sources = {}  # {年份: {股票代码: JSON 路径}}
-    for d in sorted(p for p in Path(neutral_root).iterdir() if p.is_dir() and p.name.isdigit()):
-        sources[d.name] = {f.stem.split('_')[0]: f for f in sorted(d.glob('*.json'))}
+def main(neutral_zip, out_dir, legacy_dir=None, legacy_year=None, batch_size=64, years=None, limit=None):
+    """neutral_zip：中性化结果的压缩包，其中每个以年份命名的文件夹都会被分析（其他内容忽略）。
+    legacy_dir、legacy_year：已有的旧结果及其年份，None 表示没有。
+    years、limit：试跑时只分析这些年份（如 ['2023']）、每年按文件名排序的前 limit 篇，None 表示全部。
+    试跑结果同样写入 out_dir，之后去掉限制重新运行会接着分析其余文章。"""
     store = ResultStore(out_dir)
-    if legacy_dir:
-        import_legacy(store, legacy_dir, legacy_year, sources)
-    todo = [(y, f) for y, files in sources.items() for c, f in files.items() if (y, c) not in store.done]
-    print('文章数：' + '；'.join(f'{y} 年 {len(files)} 篇' for y, files in sources.items()) +
-          f'；已完成 {len(store.done)} 篇，本次分析 {len(todo)} 篇', flush=True)
+    with zipfile.ZipFile(neutral_zip) as zf:
+        sources = {y: dict(list(files.items())[:limit]) for y, files in list_sources(zf).items()
+                   if years is None or y in years}
+        if legacy_dir:
+            import_legacy(store, legacy_dir, legacy_year, sources, zf)
+        todo = [(y, f) for y, files in sources.items() for c, f in files.items() if (y, c) not in store.done]
+        print('文章数：' + '；'.join(f'{y} 年 {len(files)} 篇' for y, files in sources.items()) +
+              f'；已完成 {len(store.done)} 篇，本次分析 {len(todo)} 篇', flush=True)
 
-    if todo:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print('使用设备：', torch.cuda.get_device_name(0) if device == 'cuda' else 'CPU（未检测到可用GPU）', flush=True)
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME).to(device).eval()
-        t0, n_sent = time.time(), 0
-        for k, (year, path) in enumerate(todo, 1):
-            doc_row, sent_rows = analyze(path, year, tokenizer, model, batch_size)
-            store.add(doc_row, sent_rows)
-            n_sent += len(sent_rows)
-            if k % 50 == 0 or k == len(todo):  # 每50篇报告一次进度
-                sec = time.time() - t0
-                print(f'[{k}/{len(todo)}] 已分析 {n_sent} 句（改写前后各一遍），'
-                      f'{2 * n_sent / sec:.0f} 句/秒，用时 {sec / 60:.1f} 分钟，'
-                      f'预计还需 {sec / k * (len(todo) - k) / 60:.1f} 分钟', flush=True)
+        if todo:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            print('使用设备：', torch.cuda.get_device_name(0) if device == 'cuda' else 'CPU（未检测到可用GPU）', flush=True)
+            tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+            model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME).to(device).eval()
+            t0, n_sent = time.time(), 0
+            for k, (year, name) in enumerate(todo, 1):
+                doc_row, sent_rows = analyze(zf, name, year, tokenizer, model, batch_size)
+                store.add(doc_row, sent_rows)
+                n_sent += len(sent_rows)
+                if k % 50 == 0 or k == len(todo):  # 每50篇报告一次进度
+                    sec = time.time() - t0
+                    print(f'[{k}/{len(todo)}] 已分析 {n_sent} 句（改写前后各一遍），'
+                          f'{2 * n_sent / sec:.0f} 句/秒，用时 {sec / 60:.1f} 分钟，'
+                          f'预计还需 {sec / k * (len(todo) - k) / 60:.1f} 分钟', flush=True)
     report(store)
     store.close()
     print(f'\n结果保存在 {out_dir}')
