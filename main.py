@@ -1,7 +1,7 @@
 """项目启动入口：修改下面的 TASK 选择要运行的功能，然后执行 python main.py"""
 from pathlib import Path
 
-from src import extract_audit, extract_mda, neutralize_llm, plot_tone_change
+from src import clean_mda_scope, extract_audit, extract_mda, neutralize_llm, plot_tone_change
 
 DATA_DIR = Path(__file__).resolve().parent / 'data'
 OUTPUT_DIR = Path(__file__).resolve().parent / 'output'  # 分析结果
@@ -11,6 +11,8 @@ TASK = 'neutralize_llm'  # 要运行的功能，可选值见下方 TASKS
 YEAR = '2023'  # 情感分析使用哪一年的文本（提取的文本按年份存放在子文件夹中）
 # 中性化时不按分析师覆盖筛选、全部保留的年报年份（分析师数据只到 2023-08，2024 年报要看的 2023 年数据不完整）
 KEEP_ALL_YEARS = {'2024'}
+# 中性化时读取清理后文本的年份（这几年提取的是整章“董事会报告”，见 src/clean_mda_scope.py）
+CLEAN_SCOPE_YEARS = {'2011', '2012', '2013', '2014'}
 
 
 def run_finbert_sentiment():
@@ -42,6 +44,11 @@ TASKS = {
         zip_path=DATA_DIR / 'annual_reports' / '2024_5405份.zip',
         out_dir=DATA_DIR / 'mda_texts',
     ),
+    # 去掉 2011-2014 年文本中不属于经营讨论和展望的小节，结果写到 mda_texts_clean，原文本不变
+    'clean_mda_scope': lambda: clean_mda_scope.main(
+        src_root=DATA_DIR / 'mda_texts',
+        out_root=DATA_DIR / 'mda_texts_clean',
+    ),
     # 从年报中提取财务报表审计报告的文字叙述
     'extract_audit': lambda: extract_audit.main(
         zip_path=DATA_DIR / 'annual_reports' / '2024_5405份.zip',
@@ -53,7 +60,7 @@ TASKS = {
     'compare_neutral_tone': run_compare_neutral_tone,
     # 调用大模型（.env 中配置）对MD&A逐句中性化改写，每篇文章一个并行任务
     'neutralize_llm': lambda: neutralize_llm.main(
-        mda_dir=DATA_DIR / 'mda_texts' / YEAR,
+        mda_dir=DATA_DIR / ('mda_texts_clean' if YEAR in CLEAN_SCOPE_YEARS else 'mda_texts') / YEAR,
         out_dir=DATA_DIR / 'mda_neutral_glm' / YEAR,
         year=YEAR,
         limit=None,  # 处理前多少篇（按文件名排序，在覆盖过滤之后），None 表示全部；已完成的会自动跳过
