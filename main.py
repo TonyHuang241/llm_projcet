@@ -1,10 +1,14 @@
 """项目启动入口：修改下面的 TASK 选择要运行的功能，然后执行 python main.py"""
 from pathlib import Path
 
-from src import clean_mda_scope, extract_audit, extract_mda, neutralize_llm, plot_tone_change
+from src import (clean_mda_scope, extract_audit, extract_mda, neutralize_llm, plot_report_logic, plot_tone_change,
+                 report_logic, report_text)
 
 DATA_DIR = Path(__file__).resolve().parent / 'data'
 OUTPUT_DIR = Path(__file__).resolve().parent / 'output'  # 分析结果
+REPORT_PDF_DIR = DATA_DIR / 'research_report' / 'reports'  # 研报 PDF
+REPORT_TEXT = DATA_DIR / 'research_report' / 'report_paragraphs.parquet'  # 研报正文段落（推理链抽取的输入）
+REPORT_LOGIC_DIR = OUTPUT_DIR / 'report_logic'  # 研报推理链（逻辑图）结果
 
 # ==================== 运行参数 ====================
 TASK = 'neutralize_llm'  # 要运行的功能，可选值见下方 TASKS
@@ -66,6 +70,23 @@ TASKS = {
     # 把中性化前后的语调变化画成交互式HTML报告（文章间、文章内两个分布）
     'plot_tone_change': lambda: plot_tone_change.main(
         compare_dir=OUTPUT_DIR / 'sentiment_analysis' / 'neutral_compare_glm',
+    ),
+    # 研报推理链第一步：PDF 正文抽取（剔除图表、表格、侧栏和免责声明），每行一个段落；已有处理好的文本时可跳过，
+    # 直接把 REPORT_TEXT 换成自己的 parquet（至少含 report_id、para_id、text 三列）
+    'report_text': lambda: report_text.main(
+        pdf_dir=REPORT_PDF_DIR,
+        out_path=REPORT_TEXT,
+    ),
+    # 研报推理链：段落 -> 大模型抽取三元组 -> BERT 向量聚类 + 大模型合并同义节点 -> 每篇研报建图并连接到“公司估值” -> JSON/parquet + HTML
+    'report_logic': lambda: report_logic.main(
+        paras_path=REPORT_TEXT,
+        out_dir=REPORT_LOGIC_DIR,
+        limit=None,  # 试跑时只处理前多少篇研报（按 report_id 排序），None 表示全部；已完成的大模型调用会自动跳过
+    ),
+    # 只重画研报逻辑图 HTML（改了样式时用，不调用大模型）
+    'report_logic_html': lambda: plot_report_logic.main(
+        graphs_path=REPORT_LOGIC_DIR / 'report_graphs.json',
+        out_html=REPORT_LOGIC_DIR / 'report_logic_graphs.html',
     ),
 }
 # ==================================================
