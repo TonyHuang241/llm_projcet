@@ -1,4 +1,4 @@
-"""研报 PDF 正文抽取：只保留正文段落，图表、表格、侧栏、页眉页脚、下载水印和末尾的免责声明全部剔除，结果写成 parquet。
+"""研报 PDF 正文抽取：只保留正文段落，图表、表格、侧栏、页眉页脚、下载水印、风险提示和末尾的免责声明全部剔除，结果写成 parquet。
 
 这是推理链抽取（src/report_logic.py）的第一步，可以单独替换：已有处理好的文本时，只要自己写出同样结构的 parquet，
 直接从第二步开始即可。parquet 每行一个段落，必需的列：
@@ -14,7 +14,8 @@
   3. 逐行剔除：页边距内的行、多页重复出现的页眉页脚、图表标题和资料来源、下载水印、分析师联系方式、竖排文字；
   4. 拼段：上一行没有以句号等结尾就接着拼；以句号结尾且下一行缩进、换项目符号、上一行没写满或行距变大时另起一段；
      小标题单独识别，作为后续段落的 section；
-  5. 段落后处理：丢掉汉字占比过低的段落（表格残留），过短的段落并入同一小节的相邻段落，过长的按句子切开。
+  5. 段落后处理：剔除风险提示（风险小节整节丢弃，段尾的“风险提示：…”截掉），丢掉汉字占比过低的段落（表格残留），
+     过短的段落并入同一小节的相邻段落，过长的按句子切开。
 
 用法：在 main.py 中设置 TASK = 'report_text'
 """
@@ -25,7 +26,6 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pymupdf
 
 FILE_RE = re.compile(r'^(?P<date>\d{8})-(?P<broker>[^-]+)-(?P<company>[^（(]+)[（(](?P<code>[0-9A-Za-z.]+)[）)].*?[：:](?P<title>.+)$')
 CJK_RE = re.compile(r'[\u4e00-\u9fff]')
@@ -55,6 +55,11 @@ BULLET_RE = re.compile(
     r'^\s*([\u2022\u25a0-\u25ff\u2600-\u27bf\uf020-\uf0ff√✓]|[\-–—*]\s|[(（]?\d{1,2}[)）]|\d{1,2}[、.．](?!\d)|[(（][一二三四五六七八九十]+[)）]|'
     r'[一二三四五六七八九十]+、|第[一二三四五六七八九十]+[，,、])')
 RATING_RE = re.compile(r'买入|增持|推荐|中性|减持|跑赢|优于大市|评级|^——')  # 首页的评级、副标题不作小标题
+# 风险提示是按惯例罗列的风险清单，不属于推理链，整节剔除。小节标题（含首页侧栏的“风险”栏目名）整行是这些词时算风险小节，
+# “关注贸易政策调整风险”这类正文小节不受影响
+RISK_HEAD_RE = re.compile(r'^\W*([一二三四五六七八九十\d]+[、.．]\s*)?(主要|投资)?风险(提示|因素|分析|因素提示)?\W*$')
+# 段首或句末之后出现的“风险提示”（前面可带项目符号）：从这里截到段尾
+RISK_TEXT_RE = re.compile(r'(?:^|(?<=[。！？；]))\W{0,3}风险(提示|因素)')
 HEADING_NUM_RE = re.compile(r'^\s*([一二三四五六七八九十]+、|\d{1,2}(\.\d{1,2})*[、.．\s](?!\d)|[(（][一二三四五六七八九十\d]+[)）])')
 
 MARGIN_TOP, MARGIN_BOTTOM = 0.045, 0.955  # 页面高度的比例，之外是页眉页脚
@@ -225,6 +230,8 @@ def assemble(lines, full_w):
     for ln in lines:
         if ln['kind'] == 'label' and prev is not None and continues(prev, ln):
             ln['kind'] = 'body'  # 句子还没结束：这是正文的最后一行（如图表前的半行），不是栏目名
+        if ln['kind'] == 'label' and RISK_HEAD_RE.match(ln['text']):
+            ln['kind'] = 'heading'  # 风险栏目名要记成小节，后面的风险清单才能整节剔除
         if ln['kind'] in ('heading', 'label'):
             flush()
             if ln['kind'] == 'heading':
@@ -280,6 +287,19 @@ def split_long(text, limit=MAX_PARA_CHARS):
     return chunks + [cur] if cur else chunks
 
 
+def strip_risk(paras):
+    """剔除风险提示：风险小节的段落整段丢弃，段首或句末之后出现“风险提示”的从那里截到段尾。"""
+    out = []
+    for p in paras:
+        if RISK_HEAD_RE.match(p.get('section') or ''):
+            continue
+        m = RISK_TEXT_RE.search(p['text'])
+        text = p['text'][:m.start()].rstrip() if m else p['text']
+        if text:
+            out.append({**p, 'text': text})
+    return out
+
+
 def tidy(paras):
     """丢掉表格残留，短段并入同一小节的相邻段，长段按句切开。"""
     paras = [p for p in paras if len(CJK_RE.findall(p['text'])) >= 10 and cjk_share(p['text']) >= MIN_CJK_SHARE
@@ -296,6 +316,7 @@ def tidy(paras):
 
 def extract_pdf(path, company=''):
     """一篇 PDF -> 段落列表 [{'page','section','text'}]，以及诊断信息。company 为公司简称，用来去掉首页的公司名标题。"""
+    import pymupdf  # 只在解析 PDF 时导入，report_logic 只用到 strip_risk，不需要装 pymupdf
     doc = pymupdf.open(path)
     pages = [page_lines(page, i + 1) for i, page in enumerate(doc)]
     cut = find_disclaimer_start(pages)
@@ -314,7 +335,7 @@ def extract_pdf(path, company=''):
     full_w = column_widths(lines, sizes)
     for ln in lines:
         ln['kind'] = classify(ln, sizes, bold_common, full_w, company)
-    return tidy(assemble([ln for ln in lines if ln['kind']], full_w)), info
+    return tidy(strip_risk(assemble([ln for ln in lines if ln['kind']], full_w))), info
 
 
 def main(pdf_dir, out_path, limit=None):

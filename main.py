@@ -77,7 +77,9 @@ TASKS = {
         pdf_dir=REPORT_PDF_DIR,
         out_path=REPORT_TEXT,
     ),
-    # 研报推理链：段落 -> 大模型抽取三元组 -> BERT 向量聚类 + 大模型合并同义节点 -> 每篇研报建图并连接到“公司估值” -> JSON/parquet + HTML
+    # 研报估值逻辑图（框架见 reports/研报逻辑图抽取框架设计.md，会计层清单见 src/fin_items.py）：概念分层填表 -> 原文连边
+    # -> 上位指标向上合并、删除孤立概念 -> 概念补全（先找原文、再按逻辑）-> 剪掉有更长链路的直连、删除没有概念连入的会计科目
+    # -> 全局去重 -> JSON/parquet + HTML
     'report_logic': lambda: report_logic.main(
         paras_path=REPORT_TEXT,
         out_dir=REPORT_LOGIC_DIR,
