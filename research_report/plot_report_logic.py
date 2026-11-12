@@ -1,13 +1,16 @@
 """把 report_logic.py 输出的 report_graphs.json 画成单文件 HTML：每篇研报一张五层逻辑图。
 
-左侧按公司列出研报，点选后在中间画图：公司估值在最上方，往下依次是会计层、经营指标、公司经营情况、外部环境
+左侧按公司列出研报，点选后在中间画图：公司估值在最上方，往下依次是会计层、经营指标、公司经营与行业、外部环境
 （左侧标出层名；同一层内有原文关系的，被影响的一方排在上面），箭头由影响因素指向被影响因素：
   边的颜色表示方向：红色为正向、绿色为负向（A 股习惯）；实线是段内原文抽取的关系，点划线是跨段原文
-  （悬挂补全或概念补全时找到的，原文引用已核对），虚线是逻辑补全（大模型按定义选择，没有原文），
-  灰色细点线是第 3 层的上位指标，灰色细实线是预置的会计关系；
+  （悬挂补全或子图补全时找到的，原文引用已核对），虚线是逻辑补全（大模型按定义选择，没有原文），
+  灰色细点线是包含关系（下位概念 ⊂ 上位概念，只在缩减之前的阶段图中出现；淡色、标“⊂✕”的是缩减时要去掉的，
+  因为下位概念另有出边），灰色细实线是预置的会计关系；
   节点显示全局名称（各研报统一后的叫法），底色表示沿路径相乘后对“公司估值”的净影响：偏红为正、偏绿为负、
-  黄色为既有正向路径又有负向路径，灰色为没有连到估值；会计层节点边框加粗，虚线边框的节点没有接入估值。
-点击节点会突出它的上游因素和下游路径，右侧显示层级、定义、别名、合并进来的下位指标、原文线索、悬挂记录，以及因另有更长链路而剪掉的直连；
+  黄色为既有正向路径又有负向路径，灰色为没有连到估值；会计层节点边框加粗，虚线边框的节点没有连到估值（子图补全失败时出现）。
+图上方可以切换四个阶段：① 概念分层（第 1 步的概念表和包含关系）、② 原文连边、③ 补全、④ 包含关系缩减（最终结果，含剪枝）；
+前三个阶段在缩减之前，一个概念是否连到估值按它所在的包含关系树判断（上位概念经下位概念的边连到估值也算）。
+点击节点会突出它的上游因素和下游路径，右侧显示层级、定义、别名、包含关系、缩减时并入的下位概念、原文线索、悬挂记录，以及因另有更长链路而剪掉的直连；
 点击边显示原文证据（逻辑补全边显示理由）和段落编号。
 分层坐标自己计算（vis 自带的分层布局遇到多个子图时节点间距过大），多个子图按大小排成若干行或列；
 布局方向默认自动选择能把图放得更大的一种（估值在上或在右），也可以手动切换。另有“全局名称表”页，用来检查跨研报去重的结果。
@@ -49,6 +52,7 @@ header h1 { font-size: 16px; margin: 0; }
 .tabs button { border: 1px solid var(--line); background: var(--bg); color: var(--ink); padding: 4px 12px;
   border-radius: 6px; cursor: pointer; font: inherit; }
 .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tabs.stages button { padding: 2px 10px; font-size: 12px; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-left: auto; }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 .legend i { display: inline-block; width: 22px; height: 0; border-top: 2px solid; }
@@ -96,14 +100,13 @@ main { flex: 1; display: flex; min-height: 0; }
     <span><i style="border-color:var(--neg)"></i>负向</span>
     <span data-origin="bridged"><i style="border-top-style:dashed;border-color:var(--ink)"></i>跨段原文（引用已核对）</span>
     <span data-origin="logic"><i style="border-top-style:dashed;border-color:var(--muted);opacity:.7"></i>逻辑补全</span>
-    <span data-origin="part_of"><i style="border-top-style:dotted;border-color:var(--muted)"></i>上位指标</span>
+    <span data-origin="part_of"><i style="border-top-style:dotted;border-color:var(--muted)"></i>包含关系（下位 ⊂ 上位）</span>
     <span data-origin="preset"><i style="border-top-width:1px;border-color:var(--muted)"></i>会计关系</span>
     <span>⚠ 与更长链路方向相反</span>
     <span><b style="background:var(--pos-bg)"></b>对估值净正向</span>
     <span><b style="background:var(--neg-bg)"></b>净负向</span>
     <span><b style="background:var(--mix-bg)"></b>正负皆有</span>
-    <span><b style="background:var(--node-bg)"></b>未连到估值</span>
-    <span><b style="background:var(--node-bg);border-style:dashed;border-color:var(--muted)"></b>未接入</span>
+    <span><b style="background:var(--node-bg);border-style:dashed;border-color:var(--muted)"></b>未连到估值</span>
   </div>
 </header>
 <main>
@@ -111,6 +114,7 @@ main { flex: 1; display: flex; min-height: 0; }
   <section id="center">
     <div id="meta"></div>
     <div id="tools">
+      <span class="tabs stages" id="stages"></span>
       <label><input type="checkbox" id="show-evid">边上显示支持次数</label>
       <label>布局 <select id="dir"><option value="auto">自动</option><option value="UD">估值在上</option><option value="RL">估值在右</option></select></label>
       <label><input type="checkbox" id="show-logic" checked>显示逻辑补全边</label>
@@ -130,13 +134,46 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&
 let current = null, network = null;
 
 // 某类边没有出现时，隐藏对应图例
-const ORIGINS = new Set(DATA.reports.flatMap(r => r.edges.map(e => e.origin)));
+const ORIGINS = new Set(DATA.reports.flatMap(r => [r, ...(r.stages || [])].flatMap(g => g.edges.map(e => e.origin))));
 document.querySelectorAll('[data-origin]').forEach(el => { if (!ORIGINS.has(el.dataset.origin)) el.style.display = 'none'; });
-const ORIGIN_SHORT = {bridged: '跨段原文', part_of: '上位指标', logic: '逻辑补全', preset: '会计关系'};
-const ORIGIN_LONG = {extracted: '段内原文抽取', bridged: '跨段原文（悬挂补全或概念补全找到，原文引用已核对）',
-  part_of: '第 3 层上位指标（加总或相乘）', logic: '逻辑补全（大模型按定义和语境选择，没有原文）', preset: '预置的会计关系'};
+const ORIGIN_SHORT = {bridged: '跨段原文', part_of: '包含关系', logic: '逻辑补全', preset: '会计关系'};
+const ORIGIN_LONG = {extracted: '段内原文抽取', bridged: '跨段原文（悬挂补全或子图补全找到，原文引用已核对）',
+  part_of: '包含关系（第 1 步整理：加总、相乘或细分；第 4 步缩减时下位概念并入最上层的概念）',
+  logic: '逻辑补全（大模型按定义和语境选择，没有原文）', preset: '预置的会计关系'};
 const LAYERS = DATA.layers || {};
-const labelOf = (r, id) => (r.nodes.find(n => n.id === id) || {}).label || id;
+// 阶段：0-2 为包含关系缩减之前的阶段图（r.stages），3 为最终图（r 本身）
+const STAGES = ['① 概念分层', '② 原文连边', '③ 补全', '④ 包含关系缩减（最终）'];
+let stage = 3;
+const view = r => stage < 3 && r.stages ? r.stages[stage] : r;
+const labelOf = (r, id) => (view(r).nodes.find(n => n.id === id) || r.nodes.find(n => n.id === id) || {}).label || id;
+
+function renderStages() {
+  const box = document.getElementById('stages');
+  box.innerHTML = '';
+  STAGES.forEach((name, i) => {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.className = i === stage ? 'on' : '';
+    b.onclick = () => { stage = i; renderStages(); draw(); };
+    box.appendChild(b);
+  });
+}
+
+function stageLine(r) {
+  const V = view(r), s = V.stats || {}, o = s.by_origin || {}, pct = x => `${Math.round((x || 0) * 100)}%`;
+  const byLayer = [3, 4, 5].map(k => `${(s.n_by_layer || {})[k] || 0}`).join('/');
+  if (stage === 0) return `第 1 步：概念 ${s.n_concepts} 个（第 3/4/5 层 ${byLayer}）· 包含关系 ${s.n_part_of || 0} 条` +
+    '（灰色点线，下位 ⊂ 上位，只在同一层内）· 还没有连边';
+  if (stage === 1) return `第 2 步：概念 ${s.n_concepts} 个（第 3/4/5 层 ${byLayer}）· 段内原文边 ${o.extracted || 0} 条` +
+    (o.bridged ? ` · 跨段原文 ${o.bridged} 条` : '') + ` · 包含关系 ${o.part_of || 0} 条` +
+    (V.edges.some(e => e.cut) ? `（其中 ${V.edges.filter(e => e.cut).length} 条缩减时去掉：下位概念另有出边）` : '') +
+    ` · 删除孤立概念 ${s.n_isolated || 0} 个` +
+    ` · 连到估值的概念 ${pct(s.reach)}（同一棵包含关系树里有一个概念连到估值就算）`;
+  if (stage === 2) return `第 3 步：走不到估值的子图 ${s.n_subgraphs || 0} 个 · 补边：原文 ${(s.added || {}).bridged || 0} 条、` +
+    `逻辑 ${(s.added || {}).logic || 0} 条 · 连到估值的概念 ${pct(s.reach)}`;
+  return '第 4 步：包含关系缩减（向上只有包含关系的概念并入上位概念，另有出边的去掉包含关系、保留原文边）；' +
+    '再剪掉有更长链路的直连、删掉没有概念连入的会计科目';
+}
 
 const reports = DATA.reports.slice().sort((a, b) => (a.company || '').localeCompare(b.company || '', 'zh') || (b.date || '').localeCompare(a.date || ''));
 
@@ -173,20 +210,22 @@ function draw() {
   const byLayer = [3, 4, 5].map(k => `${s.n_by_layer[k] || 0}`).join('/');
   document.getElementById('meta').innerHTML =
     `<div class="t">${esc(r.company)}｜${esc(r.broker)} ${esc(r.date)}｜${esc(r.title)}</div>` +
+    `<div class="s"><b>${STAGES[stage]}</b>　${esc(stageLine(r))}</div>` + (stage < 3 ? '' :
     `<div class="s">${r.n_paragraphs} 段 · 概念 ${s.n_concepts} 个（第 3/4/5 层 ${byLayer}）· ${s.n_relations} 条原文关系` +
-    (s.n_reverse ? `（反向 ${s.n_reverse} 条未进图）` : '') +
+    (s.n_reverse ? `（反向 ${s.n_reverse} 条未进图）` : '') + (s.n_parallel ? ` · 并列复核删掉 ${s.n_parallel} 条` : '') +
     ` · 原文边 ${s.n_extracted} 条` + (s.n_bridged ? ` · 跨段原文 ${s.n_bridged} 条` : '') +
+    (s.n_subgraphs ? ` · 走不到估值的子图 ${s.n_subgraphs} 个` : '') +
     (s.n_logic ? ` · 逻辑补全 ${s.n_logic} 条${s.n_logic_skip ? `（跨两层以上 ${s.n_logic_skip} 条）` : ''}` : '') +
-    (s.n_part_of ? ` · 上位指标 ${s.n_part_of} 条` : '') +
     ` · 连到估值的概念 ${Math.round(s.reach_before_completion * 100)}% → ${Math.round(s.reach * 100)}%（补全前→后）` +
-    (s.n_unconnected ? ` · 未接入 ${s.n_unconnected} 个` : '') + (s.n_merged ? ` · 下位指标向上合并 ${s.n_merged} 个` : '') +
+    (s.n_unconnected ? ` · 未连到估值 ${s.n_unconnected} 个` : '') + (s.n_merged ? ` · 下位概念并入上位概念 ${s.n_merged} 个` : '') + (s.n_cut ? ` · 去掉包含关系 ${s.n_cut} 条（下位概念另有出边）` : '') +
     (s.n_isolated ? ` · 删除孤立概念 ${s.n_isolated} 个` : '') +
     (s.n_replaced ? ` · 剪掉有更长链路的直连 ${s.n_replaced} 条` : '') +
     (s.n_conflict ? ` · 与更长链路方向相反而保留的直连 ${s.n_conflict} 条（⚠）` : '') + (s.n_pruned ? ` · 删除会计科目 ${s.n_pruned} 个` : '') +
-    (s.removed_cycle_edges ? ` · 去环删边 ${s.removed_cycle_edges} 条` : '') + '</div>';
+    (s.removed_cycle_edges ? ` · 去环删边 ${s.removed_cycle_edges} 条` : '') + '</div>');
   const showW = document.getElementById('show-evid').checked, showLogic = document.getElementById('show-logic').checked;
-  const edges = r.edges.filter(e => showLogic || e.origin !== 'logic');
-  const nodes = r.nodes.map(n => {
+  const V = view(r);
+  const edges = V.edges.filter(e => showLogic || e.origin !== 'logic');
+  const nodes = V.nodes.map(n => {
     const c = nodeColor(n);
     return {id: n.id, label: n.label || n.id, level: n.level, shape: 'box', margin: 8,
       color: {background: c.background, border: c.border, highlight: {background: c.background, border: css('--accent')}},
@@ -199,10 +238,10 @@ function draw() {
   const visEdges = edges.map((e, i) => ({
     id: i, from: e.source, to: e.target, arrows: {to: {enabled: true, scaleFactor: 0.6}},
     color: {color: css(grey(e) ? '--muted' : e.direction === '正向' ? '--pos' : '--neg'), highlight: css('--accent'),
-      opacity: e.origin === 'extracted' || e.origin === 'bridged' ? 1 : e.origin === 'logic' ? 0.6 : 0.7},
+      opacity: e.cut ? 0.3 : e.origin === 'extracted' || e.origin === 'bridged' ? 1 : e.origin === 'logic' ? 0.6 : 0.7},
     dashes: DASHES[e.origin] || false,
     width: e.origin === 'extracted' ? 1.2 + Math.min(e.weight, 5) * 0.5 : e.origin === 'preset' ? 0.8 : 1.2,
-    label: e.origin === 'part_of' ? '⊂' : (e.direction === '正向' ? '+' : '−') + (showW && e.origin === 'extracted' ? ' ×' + e.weight : '') +
+    label: e.origin === 'part_of' ? (e.cut ? '⊂✕' : '⊂') : (e.direction === '正向' ? '+' : '−') + (showW && e.origin === 'extracted' ? ' ×' + e.weight : '') +
       ((e.conflict_path || []).length ? ' ⚠' : ''),
     font: {color: css('--muted'), size: 11, strokeWidth: 3, strokeColor: css('--panel')},
   }));
@@ -210,7 +249,10 @@ function draw() {
   const box = document.getElementById('net');
   const W = box.clientWidth || 800, H = box.clientHeight || 600;
   let dir = document.getElementById('dir').value, lay;
-  if (dir === 'auto') {
+  if (stage === 0) {  // 概念分层阶段只有同层的包含关系：按层分段排
+    dir = 'UD';
+    lay = layout(nodes, visEdges, true, W, H, new Map(V.nodes.map(n => [n.id, n.layer])));
+  } else if (dir === 'auto') {
     const ud = layout(nodes, visEdges, true, W, H), rl = layout(nodes, visEdges, false, W, H);
     [dir, lay] = ud.scale >= rl.scale ? ['UD', ud] : ['RL', rl];
   } else {
@@ -220,12 +262,12 @@ function draw() {
   const vertical = dir === 'UD';
   // 层名标签：放在每层第一行的左侧（估值在右时放在上方）
   const firstRow = {};
-  r.nodes.forEach(n => { firstRow[n.layer] = Math.min(firstRow[n.layer] ?? Infinity, n.level); });
+  V.nodes.forEach(n => { firstRow[n.layer] = Math.min(firstRow[n.layer] ?? Infinity, n.level); });
   const xs = nodes.map(n => n.x), ys = nodes.map(n => n.y);
   const labels = Object.entries(firstRow).map(([k, lv]) => ({
     id: '__layer' + k, label: `第${k}层\n${LAYERS[k] || ''}`, shape: 'text', chosen: false, fixed: true,
     font: {color: css('--muted'), size: 13, face: 'PingFang SC, Microsoft YaHei, sans-serif'},
-    ...(vertical ? {x: Math.min(...xs) - 150, y: lv * lay.gap} : {x: -lv * lay.gap, y: Math.min(...ys) - 70})}));
+    ...(vertical ? {x: Math.min(...xs) - 150, y: lay.bandY ? lay.bandY[k] : lv * lay.gap} : {x: -lv * lay.gap, y: Math.min(...ys) - 70})}));
   visEdges.forEach(e => { e.smooth = {type: 'cubicBezier', forceDirection: vertical ? 'vertical' : 'horizontal', roundness: 0.4}; });
   const options = {
     layout: {hierarchical: false, improvedLayout: false},
@@ -259,13 +301,14 @@ function draw() {
     edgeSet.update(visEdges.map(e => ({id: e.id, color: {...e.color,
       opacity: !keep || (keep.has(e.from) && keep.has(e.to)) ? e.color.opacity : 0.06}})));
   }
-  showNode(r, ROOT);
+  showNode(r, V.nodes.some(n => n.id === ROOT) ? ROOT : null);
 }
 
 // 分层坐标：行号沿用数据里的 level（公司估值为 0），层内按相邻节点的平均位置排几轮以减少交叉；
 // 各子图按大小依次排成若干行（估值在上时）或列（估值在右时），行长按画布长宽比取，使整张图接近画布形状。
-// 返回 {pos: {节点: {x, y}}, scale: 整张图放进画布时的缩放比例, gap: 行距}
-function layout(nodes, edges, vertical, W, H) {
+// bands（节点 -> 层号）不为空时按层分段：每层一段，段内把各个子图（包含关系树）排成若干行，用于只有同层边的概念分层阶段。
+// 返回 {pos: {节点: {x, y}}, scale: 整张图放进画布时的缩放比例, gap: 行距, bandY: 分段时各层的起始纵坐标}
+function layout(nodes, edges, vertical, W, H, bands) {
   const GAP_LEVEL = vertical ? 110 : 220, GAP_NODE = vertical ? 170 : 56, GAP_COMP = vertical ? 70 : 50;  // 节点框最宽约 154
   const nbr = new Map(nodes.map(n => [n.id, []]));
   edges.forEach(e => { nbr.get(e.from).push(e.to); nbr.get(e.to).push(e.from); });
@@ -293,9 +336,30 @@ function layout(nodes, edges, vertical, W, H) {
       }
     }
     const width = Math.max(...ks.map(k => layers.get(k).length));
-    comps.push({layers, ks, width, along: width * GAP_NODE, across: (ks[ks.length - 1] + 1) * GAP_LEVEL});
+    comps.push({ids, layers, ks, width, along: width * GAP_NODE, across: (ks[ks.length - 1] + 1) * GAP_LEVEL});
   }
   comps.sort((a, b) => b.along * b.across - a.along * a.across);
+  if (bands) {
+    const GAP_BAND = 60, pos = {}, bandY = {};
+    comps.forEach(c => { c.across = (c.ks[c.ks.length - 1] - c.ks[0] + 1) * GAP_LEVEL; });
+    const area = comps.reduce((s, c) => s + (c.along + GAP_COMP) * (c.across + GAP_COMP), 0);
+    const lineLen = Math.max(Math.sqrt(area * W / H), ...comps.map(c => c.along));
+    let d0 = 0;
+    for (const k of [...new Set(comps.map(c => bands.get(c.ids[0])))].sort((a, b) => a - b)) {
+      bandY[k] = d0;
+      let a0 = 0, thick = 0;
+      for (const c of comps.filter(c => bands.get(c.ids[0]) === k)) {
+        if (a0 > 0 && a0 + c.along > lineLen) { a0 = 0; d0 += thick + GAP_COMP; thick = 0; }
+        c.ks.forEach(lv => c.layers.get(lv).forEach((id, i) => {
+          pos[id] = {x: a0 + (i + 0.5 + (c.width - c.layers.get(lv).length) / 2) * GAP_NODE, y: d0 + (lv - c.ks[0]) * GAP_LEVEL};
+        }));
+        a0 += c.along + GAP_COMP;
+        thick = Math.max(thick, c.across);
+      }
+      d0 += thick + GAP_BAND;
+    }
+    return {pos, scale: 1, gap: GAP_LEVEL, bandY};
+  }
   const area = comps.reduce((s, c) => s + (c.along + GAP_COMP) * (c.across + GAP_COMP), 0);
   const ratio = vertical ? W / H : H / W;  // 层内方向与跨层方向长度之比的目标值
   const lineLen = Math.max(Math.sqrt(area * ratio), ...comps.map(c => c.along));
@@ -319,32 +383,42 @@ function edgeLine(e, other) {
   const tag = e.direction === '正向' ? '<span class="tag pos">正向</span>' : '<span class="tag neg">负向</span>';
   const org = (e.origin === 'extracted' ? `原文 ${e.weight} 次` : ORIGIN_SHORT[e.origin] || e.origin) +
     ((e.conflict_path || []).length ? '，⚠ 与更长链路方向相反' : '');
-  return `<li>${e.origin === 'part_of' ? '<span class="tag grey">组成</span>' : tag}${esc(other)} <span class="ev">（${org}）</span></li>`;
+  return `<li>${e.origin === 'part_of' ? '<span class="tag grey">包含</span>' : tag}${esc(other)} <span class="ev">（${org}）</span></li>`;
 }
 
 function showNode(r, id) {
-  const n = r.nodes.find(x => x.id === id);
+  const V = view(r), n = V.nodes.find(x => x.id === id), fin = stage === 3, txt = stage >= 1;
   if (!n) {
     document.getElementById('detail').innerHTML = '<div class="ev">点击图中的节点或边查看详情。</div>';
     return;
   }
-  const eff = {'+': '<span class="tag pos">对估值净正向</span>', '-': '<span class="tag neg">对估值净负向</span>', '±': '<span class="tag mix">正负路径皆有</span>'}[n.effect]
-    || '<span class="tag grey">未连到估值</span>';
-  const ins = r.edges.filter(e => e.target === id), outs = r.edges.filter(e => e.source === id);
+  const eff = n.connected === null ? '' : {'+': '<span class="tag pos">对估值净正向</span>', '-': '<span class="tag neg">对估值净负向</span>',
+    '±': '<span class="tag mix">正负路径皆有</span>'}[n.effect] || '<span class="tag grey">未连到估值</span>';
+  const part = e => e.origin === 'part_of';
+  const ins = V.edges.filter(e => e.target === id && !part(e)), outs = V.edges.filter(e => e.source === id && !part(e));
+  const uppers = V.edges.filter(e => e.source === id && part(e)), lowers = V.edges.filter(e => e.target === id && part(e));
   const alias = (n.aliases || []).filter(a => a !== id);
   const label = n.label || id, L = x => labelOf(r, x);
   const note = x => `<li>第 ${x.para_id} 段（${esc(x.direction)}）${x.note ? '，' + esc(x.note) : ''}<div class="ev">“${esc(x.evidence)}”</div></li>`;
-  const pending = n.unresolved || [], attached = n.attached || [], hints = n.hints || [];
-  const replaced = (r.replaced_edges || []).filter(e => e.source === id);
-  const rev = (r.reverse_relations || []).filter(e => e.source === id || e.cause === id || e.effect === id);
+  const pending = fin ? n.unresolved || [] : [], attached = fin ? n.attached || [] : [], hints = fin ? n.hints || [] : [];
+  const replaced = fin ? (r.replaced_edges || []).filter(e => e.source === id) : [];
+  const rev = txt ? (r.reverse_relations || []).filter(e => e.source === id || e.cause === id || e.effect === id) : [];
+  const own = new Set([id, ...(fin ? n.merged || [] : [])]);  // 并列复核在缩减之前做，记录里是缩减前的名称
+  const par = txt ? (r.parallel_relations || []).filter(e => own.has(e.cause) || own.has(e.effect)) : [];
   document.getElementById('detail').innerHTML =
     `<h3>${esc(label)}</h3>${n.is_root ? '<span class="tag grey">估值</span>' : eff}` +
     `<span class="tag grey">第 ${n.layer} 层 ${esc(n.layer_name || '')}</span>${n.kind ? `<span class="tag grey">${esc(n.kind)}</span>` : ''}` +
-    (n.connected === false ? '<span class="tag grey">未接入</span>' : '') +
     (label !== id ? `<div class="sec">本篇名称</div><div>${esc(id)}</div>` : '') +
     (n.definition ? `<div class="sec">定义</div><div>${esc(n.definition)}</div>` : '') +
     (alias.length ? `<div class="sec">本篇别名</div><div>${alias.map(esc).join('、')}</div>` : '') +
-    ((n.merged || []).length ? `<div class="sec">向上合并进来的下位指标（${n.merged.length}）</div><div>${n.merged.map(esc).join('、')}</div>` : '') +
+    (uppers.length ? `<div class="sec">包含于（上位概念）</div><ul>${uppers.map(e =>
+      `<li>${esc(L(e.target))}${e.cut ? ' <span class="tag mix">缩减时去掉</span>' : ''}<div class="ev">${esc((e.context || [])[0] || '')}` +
+      (e.cut ? '<br>它除了包含关系还有别的出边，缩减时去掉包含关系、保留原文边，不并入上位概念' : '') + '</div></li>').join('')}</ul>` : '') +
+    (fin && n.cut_parent ? `<div class="sec">去掉的包含关系</div><div>⊂ ${esc(L(n.cut_parent))}` +
+      '<div class="ev">它除了包含关系还有别的出边，缩减时去掉包含关系、保留原文边，不并入上位概念</div></div>' : '') +
+    (lowers.length ? `<div class="sec">包含的下位概念（${lowers.length}）</div><ul>${lowers.map(e =>
+      `<li>${esc(L(e.source))}<div class="ev">${esc((e.context || [])[0] || '')}</div></li>`).join('')}</ul>` : '') +
+    (fin && (n.merged || []).length ? `<div class="sec">缩减时并入的下位概念（${n.merged.length}）</div><div>${n.merged.map(esc).join('、')}</div>` : '') +
     (outs.length ? `<div class="sec">影响（${outs.length}）</div><ul>${outs.map(e => edgeLine(e, L(e.target))).join('')}</ul>` : '') +
     (ins.length ? `<div class="sec">受以下因素影响（${ins.length}）</div><ul>${ins.map(e => edgeLine(e, L(e.source))).join('')}</ul>` : '') +
     (hints.length ? `<div class="sec">原文只写了它、没写影响对象的说法（${hints.length}）</div><ul>${hints.map(note).join('')}</ul>` : '') +
@@ -352,6 +426,8 @@ function showNode(r, id) {
     (attached.length ? `<div class="sec">已并入的悬挂记录（${attached.length}）</div><ul>${attached.map(note).join('')}</ul>` : '') +
     (rev.length ? `<div class="sec">与层级方向相反、未进图的原文关系（${rev.length}）</div><ul>${rev.map(e =>
       `<li>${esc(L(e.cause))} → ${esc(L(e.effect))}（${esc(e.direction)}）<div class="ev">“${esc(e.evidence[0] || '')}”</div></li>`).join('')}</ul>` : '') +
+    (par.length ? `<div class="sec">判为并列、未进图的原文关系（${par.length}）</div><ul>${par.map(e =>
+      `<li>${esc(e.cause)} → ${esc(e.effect)}（${esc(e.direction)}）<div class="ev">“${esc(e.evidence[0] || '')}”<br>${esc(e.reason || '')}</div></li>`).join('')}</ul>` : '') +
     (replaced.length ? `<div class="sec">剪掉的直连（另有更长链路，${replaced.length}）</div><ul>${replaced.map(e =>
       `<li>${e.direction === '正向' ? '<span class="tag pos">正向</span>' : '<span class="tag neg">负向</span>'}${esc(L(e.target))}` +
       ` <span class="ev">（${esc(ORIGIN_SHORT[e.origin] || '原文')}）</span>` +
@@ -367,6 +443,7 @@ function showEdge(e) {
   const ctx = e.context || [];
   document.getElementById('detail').innerHTML =
     `<h3>${esc(L(e.source))} → ${esc(L(e.target))}</h3>${e.origin === 'part_of' ? '' : tag}<span class="tag grey">${esc(org)}</span>` +
+    (e.cut ? '<span class="tag mix">缩减时去掉</span><div class="ev">下位概念除了包含关系还有别的出边，缩减时去掉包含关系、保留原文边</div>' : '') +
     (e.gap >= 2 ? `<span class="tag grey">跨 ${e.gap} 层</span>` : '') +
     ((e.conflict_path || []).length ? `<span class="tag mix">⚠ 与更长链路方向相反</span><div class="sec">方向相反的更长链路（直连因此保留；` +
       `可能是某条边的方向抽错了，也可能是两个不同的渠道）</div><div>${e.conflict_path.map(p => esc(L(p))).join(' → ')}</div>` : '') +
@@ -405,6 +482,7 @@ document.getElementById('tab-graph').onclick = () => tab('graph');
 document.getElementById('tab-table').onclick = () => tab('table');
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
 current = reports[0] || null;
+renderStages();
 renderList();
 if (typeof vis === 'undefined') document.getElementById('net').innerHTML = '<p style="padding:16px">vis-network 加载失败，请检查网络连接。</p>';
 else draw();

@@ -3,7 +3,7 @@
 年报txt由PDF转换而来：正文按页面宽度折行，表格被拆成每个单元格一行。
 思路：定位章节 -> 去掉页眉页脚 -> 把折行拼回段落 -> 只保留完整句子和带正文的小标题。
 
-用法: python src/extract_mda.py [年报zip路径] [输出目录]
+用法: python -m mda_tone.extract_mda [年报zip路径] [输出目录]
 """
 import re
 import statistics
@@ -11,6 +11,8 @@ import sys
 import zipfile
 from collections import Counter
 from pathlib import Path
+
+from .config import DATA_DIR
 
 # 各公司对该章节的叫法，按优先级排列（部分H股/银行放在“董事会报告”里）
 MDA_TITLES = ['管理层讨论与分析', '管理层讨论和分析', '经营情况讨论与分析', '董事会报告']
@@ -25,7 +27,6 @@ HEADING_RES = [re.compile(p) for p in (
     r'\d{1,2}[）)]',
 )]
 SENTENCE_END = tuple('。！？；：')
-DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
 PAGE_NUMBER_RE = re.compile(r'[-—\s]*(第\s*)?\d+\s*(页.*|/\s*\d+)?[-—\s]*')  # 如“12”“第12页”“12 / 230”
 # 带页码的页脚，每页不同，无法按重复次数识别，如“78丨2024 年年度报告”“XX公司 2024年年度报告 第102页”
 FOOTER_RE = re.compile(r'\d+\s*[丨|].{0,30}年度报告.{0,15}|.{0,40}年度报告\s*[丨|]?\s*(第\s*)?\d+\s*页?')
@@ -215,8 +216,8 @@ def main_years(start, end, out_dir=DATA_DIR / 'mda_texts', workers=16):
 
 
 if __name__ == '__main__':
-    # 用法1: python src/extract_mda.py --years 2023 2010 [进程数]   按年份倒序批量处理
-    # 用法2: python src/extract_mda.py [年报zip路径] [输出目录] [进程数]
+    # 用法1: python -m mda_tone.extract_mda --years 2023 2010 [进程数]   按年份倒序批量处理
+    # 用法2: python -m mda_tone.extract_mda [年报zip路径] [输出目录] [进程数]
     lower_priority()
     args = sys.argv[1:]
     if args and args[0] == '--years':

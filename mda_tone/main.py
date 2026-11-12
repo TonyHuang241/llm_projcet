@@ -1,26 +1,25 @@
-"""项目启动入口：修改下面的 TASK 选择要运行的功能，然后执行 python main.py"""
+"""年报 MD&A 语调研究的启动入口：修改下面的 TASK 选择要运行的功能，然后在仓库根目录执行 python mda_tone/main.py
+（或 python -m mda_tone.main）。假说检验的四个脚本不在这里，直接 python -m mda_tone.<脚本名> 运行，见 README.md。"""
+import sys
 from pathlib import Path
 
-from src import (clean_mda_scope, extract_audit, extract_mda, neutralize_llm, plot_report_logic, plot_tone_change,
-                 report_logic, report_text)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # 让 python mda_tone/main.py 也能找到 mda_tone 和 common 包
 
-DATA_DIR = Path(__file__).resolve().parent / 'data'
-OUTPUT_DIR = Path(__file__).resolve().parent / 'output'  # 分析结果
-REPORT_PDF_DIR = DATA_DIR / 'research_report' / 'reports'  # 研报 PDF
-REPORT_TEXT = DATA_DIR / 'research_report' / 'report_paragraphs.parquet'  # 研报正文段落（推理链抽取的输入）
-REPORT_LOGIC_DIR = OUTPUT_DIR / 'report_logic'  # 研报推理链（逻辑图）结果
+from mda_tone import (clean_mda_scope, cs_sentiment, event_study, extract_audit, extract_mda, neutralize_llm,  # noqa: E402
+                      plot_std_car, plot_tone_change)
+from mda_tone.config import DATA_DIR, OUTPUT_DIR  # noqa: E402
 
 # ==================== 运行参数 ====================
 TASK = 'neutralize_llm'  # 要运行的功能，可选值见下方 TASKS
 YEAR = '2023'  # 中性化处理哪一年的文本（提取的文本按年份存放在子文件夹中）
 # 中性化时不按分析师覆盖筛选、全部保留的年报年份（分析师数据只到 2023-08，2024 年报要看的 2023 年数据不完整）
 KEEP_ALL_YEARS = {'2024'}
-# 中性化时读取清理后文本的年份（这几年提取的是整章“董事会报告”，见 src/clean_mda_scope.py）
+# 中性化时读取清理后文本的年份（这几年提取的是整章“董事会报告”，见 mda_tone/clean_mda_scope.py）
 CLEAN_SCOPE_YEARS = {'2011', '2012', '2013', '2014'}
 
 
 def run_compare_neutral_tone():
-    from src import compare_neutral_tone  # 依赖 torch，只在用到时导入
+    from mda_tone import compare_neutral_tone  # 依赖 torch，只在用到时导入
     # 一次分析 mda_neutral_glm.zip 中所有年份（不需要解压），结果合并到同一份文件；随时可以停止，重新运行自动跳过已完成的文章
     compare_neutral_tone.main(
         neutral_zip=DATA_DIR / 'mda_neutral_glm.zip',
@@ -31,6 +30,7 @@ def run_compare_neutral_tone():
         years=None,  # 试跑时只分析哪些年份，如 ['2023']，None 表示全部
         limit=None,  # 试跑时每年只分析前多少篇（按文件名排序），None 表示全部
     )
+
 
 
 # 所有可运行的功能，新增功能时在这里加一项
@@ -69,26 +69,28 @@ TASKS = {
     ),
     # 把中性化前后的语调变化画成交互式HTML报告（文章间、文章内两个分布）
     'plot_tone_change': lambda: plot_tone_change.main(
-        compare_dir=OUTPUT_DIR / 'sentiment_analysis' / 'neutral_compare_glm',
+        compare_dir=OUTPUT_DIR / 'sentiment_analysis' / 'neutral_compare_glm_all',
     ),
-    # 研报推理链第一步：PDF 正文抽取（剔除图表、表格、侧栏和免责声明），每行一个段落；已有处理好的文本时可跳过，
-    # 直接把 REPORT_TEXT 换成自己的 parquet（至少含 report_id、para_id、text 三列）
-    'report_text': lambda: report_text.main(
-        pdf_dir=REPORT_PDF_DIR,
-        out_path=REPORT_TEXT,
+    # 把逐句情感汇总成公司*年份面板数据
+    'cs_sentiment': lambda: cs_sentiment.main(
+        compare_dir=OUTPUT_DIR / 'sentiment_analysis' / 'neutral_compare_glm_all',
+        out_path=OUTPUT_DIR / 'sentiment_data' / 'cs_sentiment.csv',
     ),
-    # 研报估值逻辑图（框架见 reports/研报逻辑图抽取框架设计.md，会计层清单见 src/fin_items.py）：概念分层填表 -> 原文连边
-    # -> 上位指标向上合并、删除孤立概念 -> 概念补全（先找原文、再按逻辑）-> 剪掉有更长链路的直连、删除没有概念连入的会计科目
-    # -> 全局去重 -> JSON/parquet + HTML
-    'report_logic': lambda: report_logic.main(
-        paras_path=REPORT_TEXT,
-        out_dir=REPORT_LOGIC_DIR,
-        limit=None,  # 试跑时只处理前多少篇研报（按 report_id 排序），None 表示全部；已完成的大模型调用会自动跳过
+    # 年报事件研究：计算发布后的 CAR，并回归到情感指标上（含控制变量、公司和年份固定效应）
+    'event_study': lambda: event_study.main(
+        panel_path=OUTPUT_DIR / 'sentiment_data' / 'cs_sentiment.csv',
+        fin_path=DATA_DIR / 'market_data' / 'financial_data.parquet',
+        daily_path=DATA_DIR / 'market_data' / 'daily_stock_data.parquet',
+        out_dir=OUTPUT_DIR / 'event_study',
     ),
-    # 只重画研报逻辑图 HTML（改了样式时用，不调用大模型）
-    'report_logic_html': lambda: plot_report_logic.main(
-        graphs_path=REPORT_LOGIC_DIR / 'report_graphs.json',
-        out_html=REPORT_LOGIC_DIR / 'report_logic_graphs.html',
+    # 按年报内句子情感标准差分成低、高两组，画两组公告日前后 CAR 中位数之差及其置信区间
+    'plot_std_car': lambda: plot_std_car.main(
+        event_panel_path=OUTPUT_DIR / 'event_study' / 'event_panel.csv',
+        daily_path=DATA_DIR / 'market_data' / 'daily_stock_data.parquet',
+        out_dir=OUTPUT_DIR / 'event_study',
+        column='sent_std_neutral',  # 用原文标准差时改为 'sent_std_orig'
+        label='中性化文本情感标准差：',
+        stem='std_neutral_car_paths',
     ),
 }
 # ==================================================

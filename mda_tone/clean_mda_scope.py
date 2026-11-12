@@ -9,7 +9,7 @@
 import re
 from pathlib import Path
 
-from src.extract_mda import SENTENCE_END, heading_level
+from .extract_mda import SENTENCE_END, heading_level
 
 # 小标题含这些词的小节整节删除（只看前两级小标题：“一、”和“（一）”）
 EXCLUDE_KEYS = (

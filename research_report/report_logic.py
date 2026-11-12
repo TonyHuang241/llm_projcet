@@ -1,18 +1,23 @@
 """从研报中提取估值逻辑图：每篇研报整理成一张分五层的有向图，原文概念逐层连到预置的会计层和公司估值
-（框架见 reports/研报逻辑图抽取框架设计.md）。
+（框架见 research_report/docs/研报逻辑图抽取框架设计.md）。
 
-五层：1 公司估值、2 会计层（这两层预置，见 src/fin_items.py，不从原文抽取）、3 经营指标、4 公司经营情况、5 外部环境。
+五层：1 公司估值、2 会计层（这两层预置，见 research_report/fin_items.py，不从原文抽取）、3 经营指标、4 公司经营与行业、5 外部环境（只放宏观和政策因素）。
 边只能从层号大的指向层号小的（可以跨层），第 3-5 层内部也可以有原文陈述的关系。
 
-输入是 src/report_text.py 写出的段落 parquet（也可以换成自己处理好的文本，列的要求见该模块说明）；
+输入是 research_report/report_text.py 写出的段落 parquet（也可以换成自己处理好的文本，列的要求见该模块说明）；
 读入时会再剔除一遍风险提示（规则同 report_text.strip_risk），自备文本里的风险提示也不会进入逻辑图。
-流程（大模型调用都走 .env 中配置的接口，见 src/neutralize_llm.py 的说明）：
+流程（大模型调用都走 .env 中配置的接口，见 common/llm_client.py 的说明）：
   1. 概念分层填表：每篇研报按顺序分块交给大模型，滚动维护“本篇概念表”（规范名、别名、定义、层级 3/4/5、类型）。
      会计科目、估值、目标价、PE/PB 等说法按 fin_items 的别名归到预置节点，不进表；篇内去重只在这里做。
-     全篇抽完关系、补完表后，再调用一次大模型整理第 3 层的“上位指标”（东盟销量 → 海外销量 → 销量），
-     然后向上合并：每棵上位指标树只保留最上层的指标，下位指标的边都改连到它上面，避免同层互相包含。
+     全篇抽完关系、补完表后，再调用一次大模型整理第 3-5 层同一层概念之间的包含关系：第 3 层为加总或相乘
+     （东盟销量 ⊂ 海外销量 ⊂ 销量），第 4、5 层为细分（东盟新能源渗透率 ⊂ 海外新能源需求，匈牙利工厂投产 ⊂ 海外基地建设）。
+     包含关系最后缩减：向上只连出一条包含关系的概念并入上位概念（它的边都改连到上位概念上），除了包含关系还有别的出边的
+     概念去掉包含关系、保留原文边，避免同层互相包含。补全在缩减后的图上做
+     （同一棵树里有一个概念连到估值，整棵树都算连上），输出里另存缩减之前三个阶段的图（概念分层、原文连边、补全）。
   2. 原文连边：每段调用一次大模型，带上概念表、会计层清单、小节标题和前一段末尾（只用于理解指代），抽出原文明说的一跳关系
      （影响因素, 正向/负向, 被影响因素, 原文片段）。表里没有的新概念附层级和定义，全篇抽完后按第 1 步的规则补进表。
+     并列复核：要进图的原文关系按研报分批、连同所在段落交给大模型逐条判断是因果还是并列（同一原因的几个结果、同一句里
+     并列罗列的事项），判为并列的删掉。
      程序核对：原文片段出自本段、名称来自概念表或会计层、出处为小节标题或前文时引用属实、指向估值倍数或公司估值时
      片段中有相应字样；不合格的带错误说明重抽。之后按两端的层级归类：
        - 从层号大的指向层号小的（或同在第 3-5 层）：进图；
@@ -20,21 +25,25 @@
        - 两端都是会计科目（或会计科目指向估值）：不新建边，和预置关系对得上的作为该关系的原文证据；
        - 第 3-5 层概念直接指向“公司估值”（如“看好出海，维持买入评级”）：不连边，留给第 3 步作为线索。
      缺影响因素的悬挂记录：被影响因素在本篇别处已有入边时直接并入；否则到提到它的段落和前两段里找（逐字引用，程序核对）。
-  3. 概念补全：先删掉孤立的单个概念（第 1、2 步之后没有任何边的，即使原文说它影响估值，也不做补全）。
-     再按第 3、4、5 层的顺序，找出还没有通往会计层的概念（只需处理这些子图的终点），
-     先取提到它的段落，让大模型找原文写明的影响对象（只能在同层或层号更小、已经接入的概念和会计科目中选，逐字引用、程序核对）；
-     找不到的，再让大模型按定义和本篇语境从同样的候选（外加同一批待连接的概念）中选出最直接影响的 1-2 个
-     （闭集选择，不造新概念；同层只选明显的构成因素或直接驱动因素，否则从上一层开始找），记为“逻辑补全”边，
-     程序检查不成环、每个概念最终都能连到会计层。先处理第 3 层，处理第 4 层时第 3 层已全部接入，所以一遍就能接通。
-  4. 建图与收尾：预置的会计层（全部科目、科目之间的关系、科目到估值的边）和以上各类边合成一张图，有环时先删逻辑补全边。
-     剪枝：任意两个节点之间既有直连、又有方向一致的更长链路时，删掉直连，其余链路都保留（不论边的类型）；
+  3. 子图补全：先删掉孤立的单个概念（第 1、2 步之后没有任何边的，即使原文说它影响估值，也不做补全）。
+     第 2 步结束时节点就确定了：会计层只保留原文抽取记录中出现过的科目和估值倍数（以及它们通往估值的预置路径），
+     补全只在这些节点和概念之间连边，不引入原文没有出现的科目。
+     主图是沿边能走到公司估值的部分，已经接入主图的概念不再补全（经同层原文关系接入的也算），逻辑补全尽可能少。
+     走不到估值的概念按弱连通分成子图，按子图最上面一层是第 3、4、5 层的顺序处理（先接入的子图可以作为后面子图的连接对象）：
+     先取子图相关的段落，让大模型找原文写明的子图概念影响主图概念的表述（只能连到主图中更上层的概念，逐字引用、程序核对）；
+     之后仍走不到估值的部分，让大模型按定义和本篇语境给每个终点（不再影响其他概念的概念）补一条边，连到主图中最直接影响的
+     更上层概念（闭集选择，不造新概念，先在上一层找），记为“逻辑补全”边。这是让子图全部走到估值所需的最少边数；
+     补的边都从子图指向主图，不会成环。
+  4. 建图与收尾：预置的会计层（原文中出现过的科目、科目之间的关系、科目到估值的边）和以上各类边合成一张图，有环时先删逻辑补全边。
+     剪枝：任意两个节点之间既有直连、又有方向一致、先往上走的更长链路时，删掉直连，其余链路都保留（不论边的类型）；
+     更长的链路第一步走的是同层节点时（如 海外销量 → 出口销量占比 → 营业收入），直连保留，下层概念直接接入上层；
      更长的链路只有方向相反的，直连保留并标记（可能是方向抽错，也可能是两个渠道，删掉会让净影响翻转）；
      最后反复删掉没有任何入边的会计科目，留下的科目都有下层概念直接或经由其他科目连入。
   5. 全局去重：所有研报的图建好后，同一层的概念用“名称：定义”的 BGE 向量取近邻和名称互相包含的作为候选对，
      交给大模型判断是否同一种概念；同一篇研报里的两个概念不合并。只给节点加“全局名称”，不改图的结构。
   6. 输出：report_graphs.json（每篇研报的节点、边、原文证据、反向关系、被路径替换和被剔除的部分、概念表，以及全局名称表）、
-     几张扁平的 parquet 表，并调用 src/plot_report_logic.py 生成可视化 HTML。
-边的 origin：extracted 段内原文 / bridged 跨段原文（悬挂补全或概念补全，引文经程序核对）/
+     几张扁平的 parquet 表，并调用 research_report/plot_report_logic.py 生成可视化 HTML。
+边的 origin：extracted 段内原文 / bridged 跨段原文（悬挂补全或子图补全，引文经程序核对）/
 logic 逻辑补全（大模型按定义选择，没有原文）/ preset 预置的会计关系。
 
 断点续跑：各步的大模型结果都追加缓存在输出目录的 *_cache.jsonl 中，重新运行只会补做缺少的部分
@@ -58,16 +67,16 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from src import fin_items, neutralize_llm
-from src.neutralize_llm import ContentFilterError, FatalAPIError, LLMClient, load_env, log
-from src.report_text import strip_risk
+from common.llm_client import ContentFilterError, FatalAPIError, LLMClient, load_env, log, set_log_path
+from research_report import fin_items
+from research_report.config import PROMPT_DIR
+from research_report.report_text import strip_risk
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-PROMPT_FILE = ROOT_DIR / 'prompts' / 'report_logic_prompt.md'
+PROMPT_FILE = PROMPT_DIR / 'report_logic_prompt.md'
 
 ROOT, MULTIPLE = fin_items.ROOT, fin_items.MULTIPLE
 ACCOUNTING_TEXT = fin_items.accounting_list()
-LAYER_NAMES = {1: '公司估值', 2: '会计层', 3: '经营指标', 4: '公司经营情况', 5: '外部环境'}
+LAYER_NAMES = {1: '公司估值', 2: '会计层', 3: '经营指标', 4: '公司经营与行业', 5: '外部环境'}
 CONCEPT_LAYERS = (3, 4, 5)  # 从原文抽取的三层
 KINDS = ('指标', '事件', '状态')
 # 指向估值倍数、公司估值时，原文片段中必须出现的字样
@@ -79,10 +88,10 @@ DIRECTIONS = {'正向': 1, '负向': -1}
 DIRECTION_ALIASES = {'正': '正向', '+': '正向', 'positive': '正向', '正相关': '正向',
                      '负': '负向', '-': '负向', 'negative': '负向', '负相关': '负向', '反向': '负向'}
 SOURCES = ('本段', '小节标题', '前文')
-PARENT_RELATIONS = ('加总', '相乘')
-ORIGIN_PRIORITY = ('extracted', 'bridged', 'preset', 'logic')  # 同一条边有多种来源时取靠前的
+PARENT_RELATIONS = ('加总', '相乘', '细分')  # 包含关系的类型：第 3 层多为加总、相乘，第 4、5 层多为细分
+ORIGIN_PRIORITY = ('extracted', 'bridged', 'preset', 'logic', 'part_of')  # 同一条边有多种来源时取靠前的；part_of 为包含关系（只在缩减前的阶段图里）
 TEXT_ORIGINS = ('extracted', 'bridged')  # 有原文证据的边
-CYCLE_RANK = {'logic': 0, 'bridged': 2, 'extracted': 3, 'preset': 9}  # 去环时先删排在前面的
+CYCLE_RANK = {'logic': 0, 'bridged': 2, 'extracted': 3, 'part_of': 8, 'preset': 9}  # 去环时先删排在前面的
 MAX_NODE_LEN = 20  # 概念名的最大字数，超过视为抽取错误
 MAX_DEF_LEN = 60
 MAX_EVIDENCE_LEN = 120
@@ -93,9 +102,12 @@ EMBED_MODEL = 'BAAI/bge-base-zh-v1.5'  # 中文句向量模型（BERT 结构）�
 TABLE_CHUNK = 3000  # 分层填表时每块原文的字数
 PREV_SENTENCES, PREV_CHARS = 2, 150  # 逐段抽取时附带的前一段末尾：句数、字数上限
 DANGLING_MAX_PARAS = 5  # 悬挂补全时最多附带的段落数
-COMPLETE_MAX_PARAS = 6  # 概念补全（原文）时最多附带的段落数
-COMPLETE_MAX_TARGETS = 2  # 概念补全时一个概念最多连到几个上层概念
-LOGIC_BATCH = 25  # 逻辑补全时每次交给大模型的概念数（同一批的概念可以互相选）
+COMPLETE_MAX_PARAS = 8  # 子图补全（原文）时最多附带的段落数
+COMPLETE_MAX_TARGETS = 2  # 子图补全（原文）时一个子图最多补几条原文边（一条就能接入主图）
+LOGIC_BATCH = 12  # 逻辑补全时每次交给大模型的子图数（每个子图只补一条边）
+PARALLEL_BATCH = 12  # 并列复核时每次交给大模型的关系数
+PARALLEL_RELATIONS = ('因果', '并列', '拿不准')
+COMPLETION_ORDER = 10 ** 9  # 子图补全加的边，order 从这里开始编号（排在原文边之后，也用来认出补全边）
 GLOBAL_SIM = 0.80  # 全局去重：“名称：定义”的 BGE 余弦达到该值算候选
 GLOBAL_TOPK = 5  # 每个名称最多取的近邻数
 GLOBAL_BATCH = 12  # 每次交给大模型的候选对数
@@ -155,7 +167,7 @@ def load_prompts():
             prompts[cur].append(line)
     prompts = {k: '\n'.join(v).strip() for k, v in prompts.items()}
     for k in ('建表-System', '建表-User', '补表-User', '归并-System', '归并-User', '抽取-System', '抽取-User',
-              '悬挂-System', '悬挂-User', '补全原文-System', '补全原文-User', '补全逻辑-System', '补全逻辑-User',
+              '并列-System', '并列-User', '悬挂-System', '悬挂-User', '补全原文-System', '补全原文-User', '补全逻辑-System', '补全逻辑-User',
               '归一-System', '归一-User'):
         if k not in prompts:
             raise SystemExit(f'{PROMPT_FILE} 中缺少 “## {k}” 一节')
@@ -307,7 +319,7 @@ def embed(texts, model_name):
 
 
 # ==================== 第 1 步：概念分层填表 ====================
-# 概念表：{规范名: {'aliases': [别名...], 'definition': 定义, 'layer': 3/4/5, 'kind': 类型, 'parent': 上位指标}}
+# 概念表：{规范名: {'aliases': [别名...], 'definition': 定义, 'layer': 3/4/5, 'kind': 类型, 'parent': 上位概念（同一层）}}
 
 def table_index(table):
     """名称或别名的字面键 -> 规范名。"""
@@ -492,7 +504,7 @@ def supplement_tables(new_vars, tables, metas, out_dir, llm, prompts, workers):
 
 
 def parse_parents(content, table):
-    """校验第 3 层上位指标的整理结果，返回 [{'name', 'parent', 'relation', 'reason'}]。"""
+    """校验包含关系的整理结果（同一层的两个概念），返回 [{'name', 'parent', 'relation', 'reason'}]。"""
     items = parse_json(content, dict).get('parents') or []
     if not isinstance(items, list):
         raise ValueError('parents 必须是数组')
@@ -502,8 +514,10 @@ def parse_parents(content, table):
             continue
         child, parent = index.get(name_key(it.get('name'))), index.get(name_key(it.get('parent')))
         rel = str(it.get('relation') or '').strip()
-        if not child or not parent or child == parent or table[child]['layer'] != 3 or table[parent]['layer'] != 3:
-            errors.append(f'“{norm_name(it.get("name"))}”和“{norm_name(it.get("parent"))}”必须是列表中两个不同的指标，名称原样书写')
+        if not child or not parent or child == parent:
+            errors.append(f'“{norm_name(it.get("name"))}”和“{norm_name(it.get("parent"))}”必须是列表中两个不同的概念，名称原样书写')
+        elif table[child]['layer'] != table[parent]['layer']:
+            errors.append(f'“{child}”（第 {table[child]["layer"]} 层）和“{parent}”（第 {table[parent]["layer"]} 层）不在同一层，不能设包含关系')
         elif rel not in PARENT_RELATIONS:
             errors.append(f'“{child}”的 relation 必须是{"或".join(PARENT_RELATIONS)}')
         else:
@@ -514,22 +528,25 @@ def parse_parents(content, table):
 
 
 def assign_parents(tables, metas, out_dir, llm, prompts, workers):
-    """第 1 步的最后一环：每篇研报调用一次大模型，给第 3 层指标找上位指标（原地写进概念表），会成环的跳过。"""
+    """第 1 步的最后一环：每篇研报调用一次大模型，在第 3-5 层同一层的概念之间找包含关系（原地把上位概念写进概念表），
+    会成环的跳过。"""
     cache_path = out_dir / 'parent_cache.jsonl'
     cache = {r['key']: r['parents'] for r in load_jsonl(cache_path)}
     sig = prompt_sig(prompts, '归并')
-    rids = sorted(rid for rid, t in tables.items() if sum(x['layer'] == 3 for x in t.values()) >= 2)
+    rids = sorted(rid for rid, t in tables.items() if max(Counter(x['layer'] for x in t.values()).values(), default=0) >= 2)
 
     def work(rid):
         table = tables[rid]
-        text = '\n'.join(f'{n} ｜ {t["definition"]}' for n, t in table.items() if t['layer'] == 3)
+        text = '\n\n'.join(f'第 {k} 层 {LAYER_NAMES[k]}：\n' + '\n'.join(f'{n} ｜ {t["definition"]}' for n, t in table.items()
+                                                                       if t['layer'] == k)
+                           for k in CONCEPT_LAYERS if any(t['layer'] == k for t in table.values()))
         key = text_hash(sig, rid, text)
         if key not in cache:
-            base = fill(prompts['归并-User'], company=metas[rid]['company'] or '未知', title=metas[rid]['title'], metrics=text)
+            base = fill(prompts['归并-User'], company=metas[rid]['company'] or '未知', title=metas[rid]['title'], concepts=text)
             try:
                 res = llm.ask(prompts['归并-System'], with_feedback(base), lambda c: parse_parents(c, table))
             except RuntimeError as e:
-                log(f'!!! {rid} 整理上位指标失败：{e}')
+                log(f'!!! {rid} 整理包含关系失败：{e}')
                 return 0
             cache[key] = res
             append_jsonl(cache_path, {'key': key, 'report_id': rid, 'parents': res})
@@ -538,7 +555,7 @@ def assign_parents(tables, metas, out_dir, llm, prompts, workers):
             child, parent = it['name'], it['parent']
             if child not in table or parent not in table or table[child]['parent']:
                 continue
-            cur = parent  # 沿上位指标往上走，走回自己就是成环
+            cur = parent  # 沿上位概念往上走，走回自己就是成环
             while cur and cur != child:
                 cur = table[cur]['parent']
             if not cur:
@@ -546,8 +563,10 @@ def assign_parents(tables, metas, out_dir, llm, prompts, workers):
                 n += 1
         return n
 
-    counts = run_parallel(rids, work, workers, '整理上位指标')
-    log(f'整理上位指标完成：{len(rids)} 篇研报共设上位指标 {sum(c or 0 for c in counts)} 个')
+    counts = run_parallel(rids, work, workers, '整理包含关系')
+    by_layer = Counter(t['layer'] for tb in tables.values() for t in tb.values() if t['parent'])
+    log(f'整理包含关系完成：{len(rids)} 篇研报共设上位概念 {sum(c or 0 for c in counts)} 个（第 3/4/5 层 '
+        f'{by_layer[3]}/{by_layer[4]}/{by_layer[5]} 个）')
 
 
 # ==================== 第 2 步：原文连边 ====================
@@ -793,6 +812,67 @@ def resolve_dangling(dangling, complete, by_rid, tables, metas, out_dir, llm, pr
     return extra, attached, unresolved
 
 
+def parse_parallel(content, n):
+    """校验并列复核结果，返回 n 个 (判断, 理由)，判断为因果、并列或拿不准。"""
+    items = parse_json(content, dict).get('decisions')
+    if not isinstance(items, list):
+        raise ValueError('缺少 decisions 数组')
+    out = {}
+    for it in items:
+        try:
+            i = int(it.get('id'))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        rel = str(it.get('relation') or '').strip()
+        if 1 <= i <= n and rel in PARALLEL_RELATIONS:
+            out[i] = (rel, norm_name(it.get('reason'))[:MAX_EVIDENCE_LEN])
+    missing = [str(i) for i in range(1, n + 1) if i not in out]
+    if missing:
+        raise ValueError(f'这些编号缺少判断，或 relation 不是{"、".join(PARALLEL_RELATIONS)}之一：{"、".join(missing)}')
+    return [out[i] for i in range(1, n + 1)]
+
+
+def check_parallel(rels, by_rid, metas, out_dir, llm, prompts, workers):
+    """并列复核：逐段抽取时模型常把同一原因的几个结果、或同一句里并列的事项抽成因果（如“销量回升，并有望提升单车收入”
+    抽成 销量 → 单车收入）。把要进图的原文关系按研报分批，连同所在段落交给大模型逐条判断，判为“并列”的删掉，
+    “因果”和“拿不准”的保留。返回 (保留的关系, 删掉的关系，各附理由)。"""
+    cache_path = out_dir / 'parallel_cache.jsonl'
+    cache = {r['key']: r['result'] for r in load_jsonl(cache_path)}
+    sig = prompt_sig(prompts, '并列')
+    by = defaultdict(list)
+    for i, r in enumerate(rels):
+        by[r['report_id']].append(i)
+    batches = [(rid, idx[k:k + PARALLEL_BATCH]) for rid, idx in sorted(by.items()) for k in range(0, len(idx), PARALLEL_BATCH)]
+
+    def work(batch):
+        rid, idx = batch
+        text = {p['para_id']: p['text'] for p in by_rid[rid]}
+        lines = '\n'.join(f'{k}. {rels[i]["cause"]} —{rels[i]["direction"]}→ {rels[i]["effect"]} ｜ 段落 '
+                          f'{"、".join(map(str, rels[i]["para_ids"]))} ｜ 原文：“{" …… ".join(rels[i]["evidence"])}”'
+                          for k, i in enumerate(idx, 1))
+        block = '\n\n'.join(f'[{p}] {text[p]}' for p in sorted({p for i in idx for p in rels[i]['para_ids']}) if p in text)
+        key = text_hash(sig, rid, lines, block)
+        if key not in cache:
+            base = fill(prompts['并列-User'], company=metas[rid]['company'] or '未知', title=metas[rid]['title'],
+                        relations=lines, paragraphs=block)
+            try:
+                res = llm.ask(prompts['并列-System'], with_feedback(base), lambda c: parse_parallel(c, len(idx)))
+            except RuntimeError as e:  # 这一批全部保留
+                log(f'!!! {rid} 有一批并列复核（{len(idx)} 条）失败，这些关系全部保留：{e}')
+                return None
+            cache[key] = res
+            append_jsonl(cache_path, {'key': key, 'report_id': rid, 'result': res})
+        return cache[key]
+
+    drop = {}
+    for (rid, idx), res in zip(batches, run_parallel(batches, work, workers, '并列复核')):
+        for i, (rel, reason) in zip(idx, res or []):
+            if rel == '并列':
+                drop[i] = reason
+    log(f'并列复核完成：{len(rels)} 条原文关系（{len(batches)} 批），判为并列而删掉 {len(drop)} 条')
+    return [r for i, r in enumerate(rels) if i not in drop], [{**rels[i], 'reason': reason} for i, reason in drop.items()]
+
+
 # ==================== 建图（第 3、4 步共用） ====================
 
 def preset_items():
@@ -800,12 +880,20 @@ def preset_items():
              'para_ids': [], 'context': []} for u, v, s in fin_items.PRESET_EDGES]
 
 
-def top_parents(table):
-    """第 3 层上位指标树：每个下位指标 -> 它所在的树最上层的指标（没有上位指标的不列）。"""
+def cut_parents(table, rels):
+    """包含关系缩减的规则：一个概念向上只连出一条包含关系时，并入上位概念；除了包含关系还有别的出边（进图的原文边）时，
+    去掉它的包含关系、保留原文边，它自己留在图中。rels 为本篇进图的原文关系（缩减前的名称），返回去掉包含关系的概念。
+    按第 2 步结束时的原文边判断：补全在缩减后的图上做，补全的边不影响这里的判断。"""
+    out = {r['cause'] for r in rels if r['effect']}
+    return {n for n, t in table.items() if t.get('parent') and n in out}
+
+
+def top_parents(table, cut=frozenset()):
+    """包含关系树：每个下位概念 -> 它并入的概念（沿上位概念往上走，走到最上层或走到去掉了包含关系的概念为止；不并入的不列）。"""
     tops = {}
     for n in table:
         cur = n
-        while table.get(cur, {}).get('parent'):
+        while cur not in cut and table.get(cur, {}).get('parent'):
             cur = table[cur]['parent']
         if cur != n:
             tops[n] = cur
@@ -813,7 +901,7 @@ def top_parents(table):
 
 
 def merge_up(r, tops):
-    """把关系两端的下位指标换成最上层的指标（向上合并），换过的在 context 里记下原来的说法。"""
+    """把关系两端的下位概念换成最上层的概念（包含关系缩减），换过的在 context 里记下原来的说法。"""
     c, e = tops.get(r['cause'], r['cause']), tops.get(r['effect'], r['effect'])
     if (c, e) == (r['cause'], r['effect']):
         return r
@@ -882,18 +970,39 @@ def connected(g):
     return nx.ancestors(g, ROOT) | {ROOT} if ROOT in g else set()
 
 
-# ==================== 第 3 步：概念补全 ====================
+# ==================== 第 3 步：子图补全 ====================
+# 主图：沿边能走到公司估值的部分。已经接入主图的概念不再补全，只给走不到估值的子图补边；
+# 逻辑补全没有原文依据，只给子图的终点各补一条（终点接上后，子图里的概念都能沿原文关系走到估值）
 
 FIN_ORDER = {n: i for i, n in enumerate(fin_items.ITEMS)}
 
 
-def candidates_text(cands, lay, layer):
-    """候选概念按层列出：同层在前，然后从上一层往上；会计科目按清单顺序排。"""
+def candidates_text(cands, lay):
+    """候选概念按层列出：从下往上（离待接入的子图越近越靠前），会计科目按清单顺序排。"""
     by = defaultdict(list)
     for n in cands:
         by[lay[n]].append(n)
-    return '\n'.join(f'第 {k} 层（{LAYER_NAMES[k]}{"，同层" if k == layer else ""}）：'
-                     f'{"、".join(sorted(by[k], key=lambda n: (FIN_ORDER.get(n, -1), n)))}' for k in sorted(by, reverse=True))
+    return '\n'.join(f'第 {k} 层（{LAYER_NAMES[k]}）：{"、".join(sorted(by[k], key=lambda n: (FIN_ORDER.get(n, -1), n)))}'
+                     for k in sorted(by, reverse=True))
+
+
+def subgraphs(g):
+    """走不到公司估值的概念按弱连通分组，每个子图为按名称排序的元组。只看和主图是否弱连通不够：子图常和主图共用
+    上游因素（如某项关税既影响主图里的毛利率，又影响子图里的海外销量），但子图本身没有一条边通往估值。"""
+    conn = connected(g)
+    return sorted(tuple(sorted(c)) for c in nx.weakly_connected_components(g.subgraph(n for n in g if n not in conn)))
+
+
+def sinks_of(g, comp):
+    """子图的终点：子图里不再影响其他概念的概念（子图里的概念只指向子图内部，否则就能走到估值了）。"""
+    return [n for n in comp if g.out_degree(n) == 0]
+
+
+def upper_cands(g, lay, sources):
+    """每个影响因素可以连的主图概念：已经连到公司估值、层号比它小的概念。原文边只从下层指向上层或同层，比影响因素更上层的
+    概念不可能是它的上游，所以补的边不会成环。"""
+    conn = connected(g) - {ROOT}
+    return {s: frozenset(m for m in conn if lay[m] < lay[s]) for s in sources}
 
 
 def mention_paras(name, table, ps):
@@ -901,12 +1010,17 @@ def mention_paras(name, table, ps):
     return [q for q in ps if any(x in squash(q['text']) for x in names)]
 
 
-def complete_paras(name, g, table, ps, notes):
-    """概念补全时查找原文的段落：线索所在段落、它作为被影响因素出现过的段落、提到它的段落，各自再带上后一段；
-    最多 COMPLETE_MAX_PARAS 段，按段落顺序排列。"""
+def comp_edges(g, comp):
+    return sorted(g.subgraph(comp).edges(data=True), key=lambda e: e[2]['order'])
+
+
+def subgraph_paras(comp, g, table, ps, hints):
+    """原文补全时查找的段落：子图中概念的线索所在段落、子图内部原文关系所在段落、提到子图中概念（终点在前）的段落，
+    各自再带上后一段；最多 COMPLETE_MAX_PARAS 段，按段落顺序排列。"""
     pos = {p['para_id']: i for i, p in enumerate(ps)}
-    first = ([x['para_id'] for x in notes] + [pid for _, _, d in g.in_edges(name, data=True) for pid in d['para_ids']]
-             + [q['para_id'] for q in mention_paras(name, table, ps)])
+    sinks = sinks_of(g, comp)
+    first = ([x['para_id'] for n in comp for x in hints.get(n, [])] + [pid for *_, d in comp_edges(g, comp) for pid in d['para_ids']]
+             + [q['para_id'] for n in sinks + [n for n in comp if n not in sinks] for q in mention_paras(n, table, ps)])
     out = []
     for pid in first:
         if pid in pos:
@@ -914,23 +1028,24 @@ def complete_paras(name, g, table, ps, notes):
     return [ps[pos[pid]] for pid in sorted(out[:COMPLETE_MAX_PARAS], key=pos.get)]
 
 
-def snippet(name, g, notes, ps, table):
-    """逻辑补全时附带的一句原文：线索、入边的原文证据，或第一次提到它的句子。"""
+def subgraph_text(comp, g, table, lay, hints, sinks=None):
+    """子图的文字说明：概念（层、定义）、内部的原文关系（附一句引文）、原文只写了它没写影响对象的说法；sinks 不为 None 时列出终点。"""
+    nodes = '；'.join(f'{n}（第 {lay[n]} 层；{table.get(n, {}).get("definition") or "—"}）'
+                     for n in sorted(comp, key=lambda n: (lay[n], n)))
+    edges = '；'.join(f'{u} → {v}（{"正向" if d["sign"] > 0 else "负向"}' + (f'，“{d["evidence"][0][:60]}”' if d['evidence'] else '')
+                     + '）' for u, v, d in comp_edges(g, comp))
+    notes = '；'.join(f'{n}：“{x["evidence"]}”' for n in comp for x in hints.get(n, []))
+    lines = [f'  概念：{nodes}', f'  原文关系：{edges}']
+    if sinks is not None:
+        lines.append(f'  终点：{"、".join(sinks)}')
     if notes:
-        return notes[0]['evidence']
-    for _, _, d in g.in_edges(name, data=True):
-        if d['evidence']:
-            return d['evidence'][0]
-    names = [squash(x) for x in [name, *table.get(name, {}).get('aliases', [])] if len(squash(x)) >= 2]
-    for p in mention_paras(name, table, ps):
-        for s in re.split(r'(?<=[。！？；])', p['text']):
-            if any(x in squash(s) for x in names):
-                return s.strip()[:80]
-    return '—'
+        lines.append(f'  原文中只写了它、没写影响对象的说法：{notes}')
+    return '\n'.join(lines)
 
 
 def parse_complete_text(content, cands, texts, index):
-    """校验概念补全（原文）结果，返回 None（没找到）或 {'links': [{'name', 'direction', 'para_id', 'quote'}], 'reason'}。"""
+    """校验子图补全（原文）结果。cands 为 {子图中的概念: 它可以连的主图概念}。
+    返回 None（没找到）或 {'links': [{'source', 'name', 'direction', 'para_id', 'quote'}], 'reason'}。"""
     obj = parse_json(content, dict)
     if not as_bool(obj.get('found', False)):
         return None
@@ -941,30 +1056,34 @@ def parse_complete_text(content, cands, texts, index):
     for it in links_in[:COMPLETE_MAX_TARGETS]:
         if not isinstance(it, dict):
             continue
-        raw, d = norm_name(it.get('name')), norm_direction(it.get('direction'))
-        name = resolve_name(raw, index)
+        raw_s, raw, d = norm_name(it.get('source')), norm_name(it.get('name')), norm_direction(it.get('direction'))
+        src, name = resolve_name(raw_s, index), resolve_name(raw, index)
         try:
             pid = int(it.get('para_id'))
         except (TypeError, ValueError):
             pid = None
-        if name not in cands:
-            errors.append(f'“{raw}”不在候选概念中')
+        if src not in cands:
+            errors.append(f'影响因素“{raw_s}”不是子图中的概念')
+        elif name not in cands[src]:
+            errors.append(f'“{raw}”不在候选概念中，或不比“{src}”更上层')
         elif d is None:
-            errors.append(f'“{raw}”的 direction 必须是正向或负向')
+            errors.append(f'“{raw_s}”→“{raw}”的 direction 必须是正向或负向')
         elif pid not in texts or not quote_in(it.get('quote'), texts[pid], min_len=4):
-            errors.append(f'“{raw}”的引文在第 {it.get("para_id")} 段中找不到，请从所给段落中逐字摘录；找不到就回答没有找到')
+            errors.append(f'“{raw_s}”→“{raw}”的引文在第 {it.get("para_id")} 段中找不到，请从所给段落中逐字摘录；找不到就回答没有找到')
         elif name in FIXED_CUES and not FIXED_CUES[name][0].search(str(it.get('quote'))):
             errors.append(f'连到“{name}”时引文中必须有{FIXED_CUES[name][1]}字样')
-        elif name not in [x['name'] for x in links]:
-            links.append({'name': name, 'direction': d, 'para_id': pid, 'quote': norm_name(it.get('quote'))[:MAX_EVIDENCE_LEN]})
+        elif (src, name) not in [(x['source'], x['name']) for x in links]:
+            links.append({'source': src, 'name': name, 'direction': d, 'para_id': pid,
+                          'quote': norm_name(it.get('quote'))[:MAX_EVIDENCE_LEN]})
     if errors:
         raise ValueError('；'.join(errors))
     return {'links': links, 'reason': norm_name(obj.get('reason'))[:MAX_EVIDENCE_LEN]} if links else None
 
 
-def parse_complete_logic(content, items, index, g):
-    """校验逻辑补全结果。items 为 [(概念, 候选集合)]，返回与之等长的 [[概念, [{'name', 'direction'}], 理由]]。
-    同一批的概念可以互相选，所以最后把所选的边加到 g 的副本上，检查没有环、每个概念都能连到公司估值。"""
+def parse_complete_logic(content, items, index):
+    """校验逻辑补全结果。items 为 [{终点: 它可以连的主图概念}]，每个子图一项，每个终点要补且只补一条边；
+    返回 [[终点, 主图概念, 方向, 理由]]，按子图、终点的顺序排列。
+    补的边从子图的终点指向已经连到公司估值的主图概念，不会成环；终点都补上后，整个子图都能走到公司估值。"""
     links_in = parse_json(content, dict).get('links')
     if not isinstance(links_in, list):
         raise ValueError('缺少 links 数组')
@@ -978,51 +1097,38 @@ def parse_complete_logic(content, items, index, g):
         if not 1 <= i <= len(items):
             errors.append(f'编号 {i} 不存在')
             continue
-        n, cands = items[i - 1]
-        links, bad = [], []
-        for t in (it.get('targets') or [])[:COMPLETE_MAX_TARGETS]:
-            if not isinstance(t, dict):
-                continue
-            raw, d = norm_name(t.get('name')), norm_direction(t.get('direction'))
-            name = resolve_name(raw, index)
-            if name not in cands:
-                bad.append(f'“{raw}”不在候选中，或会与“{n}”的上游形成环')
-            elif d is None:
-                bad.append(f'“{raw}”的 direction 必须是正向或负向')
-            elif name not in [x['name'] for x in links]:
-                links.append({'name': name, 'direction': d})
-        if bad:
-            errors.append(f'第{i}个概念：' + '；'.join(bad))
-        elif not links:
-            errors.append(f'第{i}个概念至少要选一个上层概念')
+        cands = items[i - 1]
+        raw_s, raw, d = norm_name(it.get('source')), norm_name(it.get('name')), norm_direction(it.get('direction'))
+        src, name = resolve_name(raw_s, index), resolve_name(raw, index)
+        if src not in cands:
+            errors.append(f'第{i}个子图：影响因素“{raw_s}”不是这个子图的终点（只能是{"、".join(cands)}）')
+        elif (i, src) in out:  # 每个终点只补一条，多给的不要
+            continue
+        elif name not in cands[src]:
+            errors.append(f'第{i}个子图：“{raw}”不在候选概念中，或不比“{src}”更上层')
+        elif d is None:
+            errors.append(f'第{i}个子图：“{src}”的 direction 必须是正向或负向')
         else:
-            out[i] = [n, links, norm_name(it.get('reason'))[:MAX_EVIDENCE_LEN]]
-    missing = [str(i) for i in range(1, len(items) + 1) if i not in out]
+            out[i, src] = [src, name, d, norm_name(it.get('reason'))[:MAX_EVIDENCE_LEN]]
+    missing = [f'第{i}个子图的“{s}”' for i, c in enumerate(items, 1) for s in c if (i, s) not in out]
     if missing and not errors:
-        errors.append(f'缺少这些编号：{"、".join(missing)}')
-    if not errors:
-        h = g.copy()
-        h.add_edges_from((n, x['name']) for n, links, _ in out.values() for x in links)
-        try:
-            cycle = nx.find_cycle(h)
-            errors.append(f'所选的关系形成了环（{"→".join(u for u, _ in cycle)}），请改选')
-        except nx.NetworkXNoCycle:
-            conn = connected(h)
-            errors += [f'第{i}个概念“{n}”沿所选的概念连不到会计层，请改选已连到会计层的概念' for i, (n, _) in enumerate(items, 1)
-                       if n not in conn]
+        errors.append(f'这些终点还没有补边：{"、".join(missing)}')
     if errors:
         raise ValueError('；'.join(errors))
-    return [out[i] for i in range(1, len(items) + 1)]
+    return [out[i, s] for i, c in enumerate(items, 1) for s in c]
 
 
-def complete_concepts(graphs, tables, hints, by_rid, metas, out_dir, llm, prompts, workers):
-    """第 3 步：按第 3、4、5 层的顺序，把还没有通往会计层的概念接上去（原地给 graphs 加边）。
+def complete_subgraphs(graphs, tables, hints, by_rid, metas, out_dir, llm, prompts, workers):
+    """第 3 步：给走不到公司估值的子图补边，原地给 graphs 加边；已经能沿原文关系走到估值的概念不再补全。
+    按子图最上面一层是第 3、4、5 层的顺序处理，先接入的子图可以作为后面子图的连接对象。每个子图先在原文中找子图里的
+    概念影响主图概念的表述（逐字引用、程序核对，最多 COMPLETE_MAX_TARGETS 条）；之后仍走不到估值的部分，按逻辑给每个
+    终点补一条边，连到主图中更上层的概念，这是让子图全部走到估值所需的最少边数。
     hints 为 {report_id: {概念: [原文只写了它、没写影响对象的记录]}}。返回 {report_id: Counter}。"""
     text_path, logic_path = out_dir / 'complete_text_cache.jsonl', out_dir / 'complete_logic_cache.jsonl'
     text_cache = {r['key']: r['result'] for r in load_jsonl(text_path)}
     logic_cache = {r['key']: r['result'] for r in load_jsonl(logic_path)}
     sig_t, sig_l = prompt_sig(prompts, '补全原文'), prompt_sig(prompts, '补全逻辑')
-    counts, seq = defaultdict(Counter), itertools.count(10 ** 9)  # 补出的边排在原文边之后
+    counts, seq = defaultdict(Counter), itertools.count(COMPLETION_ORDER)  # 补出的边排在原文边之后
 
     def add(rid, u, v, direction, origin, evidence, pids, context):
         sign = DIRECTIONS[direction]
@@ -1031,102 +1137,107 @@ def complete_concepts(graphs, tables, hints, by_rid, metas, out_dir, llm, prompt
         counts[rid][origin] += 1
 
     def work_text(task):
-        rid, n, cands, layer = task
-        table, g, notes = tables[rid], graphs[rid], hints[rid].get(n, [])
-        paras = complete_paras(n, g, table, by_rid[rid], notes)
-        if not paras or not cands:
+        rid, comp, cands = task
+        table, g, hint = tables[rid], graphs[rid], hints[rid]
+        paras = subgraph_paras(comp, g, table, by_rid[rid], hint)
+        union = set().union(*cands.values())
+        if not paras or not union:
             return None
+        lay = layer_map(g, table)
         texts = {p['para_id']: p['text'] for p in paras}
         block = '\n\n'.join(f'[{pid}] {t}' for pid, t in texts.items())
-        ctext = candidates_text(cands, layer_map(g, table), layer)
-        hint = '；'.join(f'第 {x["para_id"]} 段“{x["evidence"]}”' for x in notes) or '无'
-        key = text_hash(sig_t, rid, n, ctext, block, hint)
+        sub, ctext = subgraph_text(comp, g, table, lay, hint), candidates_text(union, lay)
+        key = text_hash(sig_t, rid, sub, ctext, block)
         if key not in text_cache:
             base = fill(prompts['补全原文-User'], company=metas[rid]['company'] or '未知', title=metas[rid]['title'],
-                        concept=n, layer=layer, layer_name=LAYER_NAMES[layer], definition=table.get(n, {}).get('definition', ''),
-                        hint=hint, candidates=ctext, paragraphs=block)
+                        subgraph=sub, candidates=ctext, paragraphs=block)
             index = table_index(table)
             try:
                 res = llm.ask(prompts['补全原文-System'], with_feedback(base),
                               lambda c: parse_complete_text(c, cands, texts, index), lenient=lambda c: None)
             except RuntimeError as e:
-                log(f'!!! {rid} “{n}”的概念补全（原文）失败，改用逻辑补全：{e}')
+                log(f'!!! {rid} 子图（{"、".join(comp)}）的原文补全失败，改用逻辑补全：{e}')
                 return None
             text_cache[key] = res
-            append_jsonl(text_path, {'key': key, 'report_id': rid, 'concept': n, 'result': res})
+            append_jsonl(text_path, {'key': key, 'report_id': rid, 'subgraph': list(comp), 'result': res})
         return text_cache[key]
 
     def work_logic(batch):
-        rid, items, layer = batch
+        rid, items = batch  # items: [(子图, {终点: 可以连的主图概念})]
         table, g = tables[rid], graphs[rid]
-        mates = {n for n, _ in items}  # 同一批的概念可以互相选
-        items = [(n, c | (mates - {n})) for n, c in items]
-        cands = set().union(*(c for _, c in items))
-        if not cands:
+        lay = layer_map(g, table)
+        union = set().union(*(m for _, c in items for m in c.values()))
+        if not union:
             return None
-        ctext = candidates_text(cands, layer_map(g, table), layer)
-        lines = '\n'.join(f'{i}. {n} ｜ {table.get(n, {}).get("definition") or "—"} ｜ '
-                          f'{snippet(n, g, hints[rid].get(n, []), by_rid[rid], table)}' for i, (n, _) in enumerate(items, 1))
+        lines = '\n\n'.join(f'子图 {i}\n{subgraph_text(comp, g, table, lay, hints[rid], sinks=list(c))}'
+                            for i, (comp, c) in enumerate(items, 1))
+        ctext = candidates_text(union, lay)
         key = text_hash(sig_l, rid, lines, ctext)
         if key not in logic_cache:
             base = fill(prompts['补全逻辑-User'], company=metas[rid]['company'] or '未知', title=metas[rid]['title'],
-                        layer=layer, concepts=lines, candidates=ctext)
+                        subgraphs=lines, candidates=ctext)
             index = table_index(table)
             try:
-                res = llm.ask(prompts['补全逻辑-System'], with_feedback(base), lambda c: parse_complete_logic(c, items, index, g))
+                res = llm.ask(prompts['补全逻辑-System'], with_feedback(base),
+                              lambda c: parse_complete_logic(c, [c_ for _, c_ in items], index))
             except RuntimeError as e:
-                log(f'!!! {rid} 有一批逻辑补全（{len(items)} 个概念）失败，这些概念保持未接入：{e}')
+                log(f'!!! {rid} 有一批逻辑补全（{len(items)} 个子图）失败，这些子图保持不连通：{e}')
                 return None
             logic_cache[key] = res
             append_jsonl(logic_path, {'key': key, 'report_id': rid, 'result': res})
         return logic_cache[key]
 
-    def candidates(g, table, n, layer):
-        """同层或更上层、已经接入的概念，去掉 n 的上游（选它们会成环）。"""
-        lay = layer_map(g, table)
-        return {m for m in connected(g) if m != ROOT and lay[m] <= layer} - nx.ancestors(g, n)
-
     for layer in CONCEPT_LAYERS:
-        tasks = []  # (report_id, 概念, 候选概念, 层)
+        tasks = []  # (report_id, 子图, {子图中的概念: 可以连的主图概念})
         for rid in sorted(graphs):
             g = graphs[rid]
-            lay, conn = layer_map(g, tables[rid]), connected(g)
-            todo = {n for n in g if lay[n] == layer and n not in conn}
-            for n in sorted(todo):
-                if not any(s in todo for s in g.successors(n)):  # 只处理未接入部分的终点
-                    tasks.append((rid, n, candidates(g, tables[rid], n, layer), layer))
-        rest = defaultdict(list)
-        for (rid, n, cands, _), res in zip(tasks, run_parallel(tasks, work_text, workers, f'第 {layer} 层概念补全（原文）')):
-            if res:
-                for x in res['links']:
-                    add(rid, n, x['name'], x['direction'], 'bridged', [x['quote']], [x['para_id']],
-                        ['概念补全（原文）' + (f'：{res["reason"]}' if res['reason'] else '')])
-            else:
-                rest[rid].append(n)
-        # 原文找到的概念已经接入，可以作为其余概念的候选，所以重新算一遍候选
-        rest = {rid: [(n, candidates(graphs[rid], tables[rid], n, layer)) for n in ns] for rid, ns in rest.items()}
-        batches = [(rid, items[i:i + LOGIC_BATCH], layer) for rid, items in rest.items()
-                   for i in range(0, len(items), LOGIC_BATCH)]
-        for (rid, _, _), res in zip(batches, run_parallel(batches, work_logic, workers, f'第 {layer} 层概念补全（逻辑）')):
-            for n, links, reason in res or []:
-                for x in links:
-                    add(rid, n, x['name'], x['direction'], 'logic', [], [], [reason] if reason else [])
-        log(f'第 {layer} 层概念补全：{len(tasks)} 个未接入的终点，原文找到 {len(tasks) - sum(map(len, rest.values()))} 个，'
-            f'逻辑补全 {sum(map(len, rest.values()))} 个（{len(batches)} 批）')
+            lay = layer_map(g, tables[rid])
+            tasks += [(rid, comp, upper_cands(g, lay, comp)) for comp in subgraphs(g) if min(lay[n] for n in comp) == layer]
+        n0 = sum(c['bridged'] for c in counts.values())
+        for (rid, comp, _), res in zip(tasks, run_parallel(tasks, work_text, workers, f'第 {layer} 层子图补全（原文）')):
+            for x in (res or {}).get('links', []):
+                add(rid, x['source'], x['name'], x['direction'], 'bridged', [x['quote']], [x['para_id']],
+                    ['子图补全（原文）' + (f'：{res["reason"]}' if res['reason'] else '')])
+        # 原文边可能只接上了子图的一部分：剩下仍走不到估值的部分重新分组，每个终点按逻辑补一条
+        todo = defaultdict(set)
+        for rid, comp, _ in tasks:
+            todo[rid] |= set(comp)
+        rest, stuck = {}, []
+        for rid, nodes in todo.items():
+            g = graphs[rid]
+            lay = layer_map(g, tables[rid])
+            rest[rid] = []
+            for comp in subgraphs(g):
+                if set(comp) <= nodes:
+                    cands = upper_cands(g, lay, sinks_of(g, comp))
+                    stuck += [(rid, s) for s, c in cands.items() if not c]  # 主图里没有比它更上层的节点（原文没提到可连的科目）
+                    if any(cands.values()):
+                        rest[rid].append((comp, {s: c for s, c in cands.items() if c}))
+        if stuck:
+            log(f'第 {layer} 层有 {len(stuck)} 个终点在主图中没有更上层的节点可连，保持走不到估值：'
+                f'{"、".join(f"{rid[:20]}…{s}" for rid, s in stuck[:10])}')
+        batches = [(rid, items[i:i + LOGIC_BATCH]) for rid, items in rest.items() for i in range(0, len(items), LOGIC_BATCH)]
+        for (rid, _), res in zip(batches, run_parallel(batches, work_logic, workers, f'第 {layer} 层子图补全（逻辑）')):
+            for src, name, direction, reason in res or []:
+                add(rid, src, name, direction, 'logic', [], [], [reason] if reason else [])
+        log(f'第 {layer} 层子图补全：{len(tasks)} 个走不到估值的子图（{sum(len(c) for _, c, _ in tasks)} 个概念），'
+            f'原文补边 {sum(c["bridged"] for c in counts.values()) - n0} 条；之后仍走不到估值的 {sum(map(len, rest.values()))} 个子图'
+            f'共 {sum(len(c) for items in rest.values() for _, c in items)} 个终点，逐个逻辑补全（{len(batches)} 批）')
     return counts
 
 
 # ==================== 第 4 步：剪枝 ====================
 
-def other_path(g, u, v, sign=None):
+def other_path(g, u, v, sign=None, first_ok=None):
     """DAG g 中不经过直连 u→v、从 u 到 v 的一条更长路径（广度优先，取最短的那条），返回节点列表或 None；
-    sign 不为 None 时只找各段方向相乘等于 sign 的路径。按 (节点, 累计方向) 搜索，DAG 中找到的一定是简单路径。"""
+    sign 不为 None 时只找各段方向相乘等于 sign 的路径，first_ok 不为 None 时第一步只走 first_ok(节点) 为真的节点。
+    按 (节点, 累计方向) 搜索，DAG 中找到的一定是简单路径。"""
     start = (u, 1)
     parent, queue = {start: None}, deque([start])
     while queue:
         n, s = queue.popleft()
         for m in g.successors(n):
-            if n == u and m == v:
+            if n == u and (m == v or first_ok and not first_ok(m)):
                 continue
             st = (m, s * g.edges[n, m]['sign'] if sign is not None else 1)
             if st in parent:
@@ -1143,21 +1254,23 @@ def other_path(g, u, v, sign=None):
     return None
 
 
-def prune_shortcuts(g):
-    """剪枝：任意两个节点之间既有直连、又有方向一致的更长链路时，删掉直连，其余链路都保留（不论各段是哪类边）。
-    更长的链路只有方向相反的，直连保留，并在边上记下 conflict_path（可能是某条边的方向抽错了，也可能是两个不同的渠道，
-    删掉直连会让净影响翻转）。
-    删掉方向一致的直连不改变任何两点之间的可达性和可能的方向，所以逐条删即可。返回被删的直连，各附一条代替它的链路。"""
+def prune_shortcuts(g, lay):
+    """剪枝：任意两个节点之间既有直连、又有方向一致的更长链路、且这条链路第一步就走到更上层时，删掉直连，
+    其余链路都保留（不论各段是哪类边）。lay 为 {节点: 层号}。
+    更长的链路第一步走的是同层节点时（如 海外销量 → 出口销量占比 → 营业收入），直连保留：下层的概念直接接入上层，
+    同层的链路只是补充。更长的链路只有方向相反的，直连也保留，并在边上记下 conflict_path（可能是某条边的方向抽错了，
+    也可能是两个不同的渠道，删掉直连会让净影响翻转）。
+    删掉这样的直连不改变任何两点之间的可达性和可能的方向，所以逐条删即可。返回被删的直连，各附一条代替它的链路。"""
     removed = []
     for u, v in sorted(g.edges, key=lambda e: g.edges[e]['order']):
         d = g.edges[u, v]
-        path = other_path(g, u, v, d['sign'])
+        path = other_path(g, u, v, d['sign'], first_ok=lambda m: lay[m] < lay[u])
         if path:
             removed.append({'source': u, 'target': v, 'direction': '正向' if d['sign'] > 0 else '负向', 'origin': d['origin'],
                             'evidence': d['evidence'], 'para_ids': d['para_ids'], 'context': d.get('context', []), 'path': path})
             g.remove_edge(u, v)
-    for u, v, d in g.edges(data=True):  # 剩下的直连如果还有更长的链路，方向一定相反
-        d['conflict_path'] = other_path(g, u, v) or []
+    for u, v, d in g.edges(data=True):  # 剩下的直连：没有方向一致的更长链路、只有方向相反的，才算冲突
+        d['conflict_path'] = [] if other_path(g, u, v, d['sign']) else other_path(g, u, v) or []
     return removed
 
 
@@ -1171,6 +1284,18 @@ def prune_accounting(g):
             return removed
         g.remove_nodes_from(drop)
         removed += drop
+
+
+def text_accounting(g, records):
+    """第 2 步结束时保留的会计层节点：本篇原文抽取记录（含只写了一端的悬挂记录）中出现过的会计科目和估值倍数，
+    以及从它们沿预置关系通往公司估值要经过的科目。g 为含全部预置科目的图。"""
+    seen = {x for r in records for x in (r['cause'], r['effect']) if x in fin_items.ITEMS}
+    return seen | {m for n in seen if n in g for m in nx.descendants(g, n) if m in fin_items.ITEMS}
+
+
+def drop_accounting(g, keep):
+    """删掉 keep 以外的会计科目：第 2 步之后节点就确定了，第 3 步补全只在已有的节点之间连边，不引入原文没有出现的科目。"""
+    g.remove_nodes_from([n for n in list(g) if n in fin_items.ITEMS and n not in keep])
 
 
 # ==================== 第 5 步：全局去重 ====================
@@ -1315,12 +1440,9 @@ def graph_record(g, meta, info, table, mapping, notes):
                       'connected': n in conn, 'mentions': mentions[n],
                       'definition': t.get('definition') or fin_items.DEFS.get(n, ''), 'aliases': t.get('aliases', []),
                       'merged': sorted(notes['merged'].get(n, [])), 'unresolved': notes['unresolved'].get(n, []),
-                      'attached': notes['attached'].get(n, []), 'hints': notes['hints'].get(n, [])})
-    edges = [{'source': u, 'target': v, 'direction': '正向' if d['sign'] > 0 else '负向', 'origin': d['origin'],
-              'gap': lay[u] - lay[v], 'weight': d['weight'], 'n_pos': d['n_pos'], 'n_neg': d['n_neg'],
-              'evidence': d['evidence'], 'para_ids': d['para_ids'], 'context': d.get('context', []),
-              'conflict_path': d.get('conflict_path', [])}
-             for u, v, d in sorted(g.edges(data=True), key=lambda e: (level[e[0]], e[0], e[1]))]
+                      'attached': notes['attached'].get(n, []), 'hints': notes['hints'].get(n, []),
+                      'cut_parent': table[n]['parent'] if n in notes['cut'] else ''})
+    edges = edge_rows(g, lay, level)
     concepts = [n for n in g if lay[n] >= 3]
     by_origin = Counter(e['origin'] for e in edges)
     stats = {'n_table_vars': len(table), 'n_relations': info['n_relations'], 'n_dangling': info['n_dangling'],
@@ -1333,6 +1455,8 @@ def graph_record(g, meta, info, table, mapping, notes):
              'reach_before_completion': info['reach_before'], 'reach': sum(n in conn for n in concepts) / max(len(concepts), 1),
              'n_unconnected': sum(n not in conn for n in concepts), 'n_pruned': len(notes['pruned']),
              'n_isolated': len(notes['isolated']), 'n_merged': sum(map(len, notes['merged'].values())),
+             'n_parallel': len(notes['parallel']), 'n_subgraphs': info['n_subgraphs'],
+             'n_cut': sum(n in notes['cut'] for n in concepts),
              'n_replaced': len(notes['replaced']),
              'n_conflict': sum(bool(e['conflict_path']) for e in edges),
              'n_components': nx.number_weakly_connected_components(g),
@@ -1340,8 +1464,68 @@ def graph_record(g, meta, info, table, mapping, notes):
              'depth': max(level.values()) if level else 0}
     return {**meta, 'stats': stats, 'nodes': nodes, 'edges': edges, 'replaced_edges': notes['replaced'],
             'removed_cycle_edges': notes['removed'], 'reverse_relations': notes['reverse'],
-            'accounting_relations': notes['accounting'], 'pruned_accounting': notes['pruned'], 'isolated_concepts': notes['isolated'],
+            'accounting_relations': notes['accounting'], 'parallel_relations': notes['parallel'],
+            'pruned_accounting': notes['pruned'], 'isolated_concepts': notes['isolated'],
             'variable_table': [{'name': n, **t} for n, t in table.items()]}
+
+
+def edge_rows(g, lay, level):
+    return [{'source': u, 'target': v, 'direction': '正向' if d['sign'] > 0 else '负向', 'origin': d['origin'],
+             'gap': lay[u] - lay[v], 'weight': d['weight'], 'n_pos': d['n_pos'], 'n_neg': d['n_neg'],
+             'evidence': d['evidence'], 'para_ids': d['para_ids'], 'context': d.get('context', []),
+             'conflict_path': d.get('conflict_path', []), 'cut': d.get('cut', False)}
+            for u, v, d in sorted(g.edges(data=True), key=lambda e: (level[e[0]], e[0], e[1]))]
+
+
+# ==================== 阶段图（第 1-3 步的结果，包含关系缩减之前） ====================
+
+def contain_items(table, names):
+    """names 中各概念到上位概念的包含关系边（下位概念 → 上位概念，正向）。"""
+    return [{'cause': n, 'effect': table[n]['parent'], 'direction': '正向', 'origin': 'part_of', 'evidence': [], 'para_ids': [],
+             'context': [f'{table[n].get("parent_relation") or "包含"}：{table[n].get("parent_reason") or "—"}']}
+            for n in sorted(names) if table[n].get('parent')]
+
+
+def unmerged_graph(text_rels, acc_rels, table, cut):
+    """包含关系缩减之前的图：预置的会计层 + 合并前的原文边 + 包含关系边。只保留自己或并入它的下位概念有原文边的概念，
+    以及它们要并入的上位概念，其余的是孤立概念（缩减后同样被删掉）。cut 中的概念缩减时去掉包含关系：两端都在图中、
+    且不会成环时也画出来，边上标 cut。返回 (图, 为去环删掉的边)。"""
+    keep = set()
+    for n in {x for r in text_rels for x in (r['cause'], r['effect']) if (layer_of(x, table) or 0) >= 3}:
+        while n and n not in keep:
+            keep.add(n)
+            n = None if n in cut else table.get(n, {}).get('parent')
+    g, _, removed = build_graph(preset_items() + text_rels + contain_items(table, keep - cut))
+    for n in sorted(keep & cut):
+        p = table[n]['parent']
+        if p in g and not g.has_edge(n, p) and not nx.has_path(g, p, n):
+            g.add_edge(n, p, sign=1, origin='part_of', weight=1, n_pos=1, n_neg=0, evidence=[], para_ids=[],
+                       context=contain_items(table, [n])[0]['context'], order=0, cut=True)
+    attach_accounting(g, acc_rels)
+    return g, removed
+
+
+def stage_record(name, g, table, mapping, tops, ref=None, extra=None):
+    """一个阶段的图。ref 为同一时刻包含关系缩减后的图：一个概念是否连到估值、净影响按它所在的包含关系树（最上层的概念）
+    在 ref 中的情况标注（缩减前，上位概念自己常常没有出边，经下位概念的边连到估值）；ref 为 None 时（第 1 步，还没有边）不标。"""
+    g = g.copy()
+    break_cycles(g)
+    lay = layer_map(g, table)
+    level, _ = annotate(g, lay)
+    conn, eff = (connected(ref), annotate(ref, layer_map(ref, table))[1]) if ref is not None else (set(), {})
+    nodes = [{'id': n, 'label': mapping.get(n, n), 'layer': lay[n], 'layer_name': LAYER_NAMES[lay[n]], 'level': level[n],
+              'is_root': n == ROOT, 'is_preset': n in fin_items.ITEMS, 'kind': table.get(n, {}).get('kind', ''),
+              'effect': eff.get(tops.get(n, n), '') if ref is not None else '',
+              'connected': tops.get(n, n) in conn if ref is not None else None,
+              'definition': table.get(n, {}).get('definition') or fin_items.DEFS.get(n, ''),
+              'aliases': table.get(n, {}).get('aliases', [])}
+             for n in sorted(g, key=lambda n: (level[n], n))]
+    edges = edge_rows(g, lay, level)
+    concepts = [x for x in nodes if x['layer'] >= 3]
+    stats = {'n_concepts': len(concepts), 'n_by_layer': {k: sum(x['layer'] == k for x in nodes) for k in LAYER_NAMES},
+             'by_origin': Counter(e['origin'] for e in edges),
+             'reach': sum(bool(x['connected']) for x in concepts) / max(len(concepts), 1), **(extra or {})}
+    return {'name': name, 'nodes': nodes, 'edges': edges, 'stats': stats}
 
 
 def rel_row(r):
@@ -1353,7 +1537,7 @@ def main(paras_path, out_dir, limit=None, embed_model=EMBED_MODEL, html_name='re
     """paras_path：段落 parquet（report_text.py 的输出或自备文本）；limit：只处理前多少篇研报（按 report_id 排序），None 为全部。"""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    neutralize_llm.LOG_PATH = out_dir / '_progress.log'
+    set_log_path(out_dir / '_progress.log')
     env = load_env()
     workers = int(env.get('CONCURRENCY') or DEFAULT_CONCURRENCY)
     prompts, llm = load_prompts(), LLM(env)
@@ -1384,7 +1568,7 @@ def main(paras_path, out_dir, limit=None, embed_model=EMBED_MODEL, html_name='re
     # 1. 概念分层填表
     tables = build_tables(by_rid, metas, out_dir, llm, prompts, workers)
 
-    # 2. 原文连边，再把新概念补进表、整理第 3 层上位指标（第 1 步的最后一环，要等表补全后再做）
+    # 2. 原文连边，再把新概念补进表、整理第 3-5 层的包含关系（第 1 步的最后一环，要等表补全后再做）
     rels, new_vars, rejected = extract_relations(by_rid, tables, metas, out_dir, llm, prompts, workers)
     renames = supplement_tables(new_vars, tables, metas, out_dir, llm, prompts, workers)
     for r in rels:
@@ -1402,16 +1586,28 @@ def main(paras_path, out_dir, limit=None, embed_model=EMBED_MODEL, html_name='re
     dangling = [r for r in rels if r['cause'] is None and r['effect']]
     extra, attached, unresolved = resolve_dangling(dangling, complete, by_rid, tables, metas, out_dir, llm, prompts, workers)
 
-    # 第 3 层上位指标向上合并：每棵上位指标树只保留最上层的指标，下位指标的边都改连到它上面，树内部的关系去掉
-    tops = {rid: top_parents(tables[rid]) for rid in report_ids}
+    # 并列复核：要进图的原文关系逐条确认原文说的是因果，而不是把并列的事项抽成了因果（用合并前的名称判断）
+    to_check = [r for r in complete + extra if classify(r, tables[r['report_id']]) == 'edge']
+    kept, parallel = check_parallel(to_check, by_rid, metas, out_dir, llm, prompts, workers)
+    parallel_by = defaultdict(list)
+    for r in parallel:
+        parallel_by[r['report_id']].append({**rel_row(r), 'reason': r['reason']})
+
+    # 包含关系缩减：每棵包含关系树只保留最上层的概念，下位概念的边都改连到它上面，树内部的关系去掉。
+    # 补全在缩减后的图上做（同一棵树里只要有一个概念连到估值，整棵树都算连上，缩减后不会多出用不着的逻辑边），
+    # 所以缩减在这里就算好；输出里另画缩减之前各阶段的图
+    # 向上只有包含关系的概念并入上位概念；除了包含关系还有别的出边的，去掉包含关系、保留原文边
+    cut = {rid: cut_parents(tables[rid], [r for r in kept if r['report_id'] == rid]) for rid in report_ids}
+    tops = {rid: top_parents(tables[rid], cut[rid]) for rid in report_ids}
     merged_rels, n_inner = [], 0
-    for r in complete + extra:
+    for r in kept + [r for r in complete + extra if classify(r, tables[r['report_id']]) != 'edge']:
         r = merge_up(r, tops[r['report_id']])
         if r['cause'] == r['effect']:
             n_inner += 1
         else:
             merged_rels.append(r)
-    log(f'上位指标向上合并：{sum(map(len, tops.values()))} 个下位指标并入最上层的指标，树内部的关系 {n_inner} 条随之去掉')
+    log(f'包含关系缩减：{sum(map(len, tops.values()))} 个下位概念并入上位概念，树内部的关系 {n_inner} 条随之去掉；'
+        f'{sum(map(len, cut.values()))} 个下位概念另有出边，去掉包含关系、保留原文边')
 
     # 按两端的层级归类
     groups = {k: defaultdict(list) for k in ('edge', 'accounting', 'reverse')}
@@ -1436,35 +1632,47 @@ def main(paras_path, out_dir, limit=None, embed_model=EMBED_MODEL, html_name='re
     for rid in report_ids:
         tb = tables[rid]
         g, info, removed = build_graph(preset_items() + groups['edge'][rid])
-        isolated = sorted(n for n in tb if tops[rid].get(n, n) not in g)  # 并入了孤立节点的下位指标也一并删掉
+        isolated = sorted(n for n in tb if tops[rid].get(n, n) not in g)  # 并入了孤立节点的下位概念也一并删掉
         merged = defaultdict(list)
         for child, top in tops[rid].items():
             if top in g:
                 merged[top].append(child)
         acc_unmatched = attach_accounting(g, groups['accounting'][rid])
+        # 第 2 步结束时节点就确定了：会计层只留原文中出现过的科目（及其通往估值的预置路径），补全不能再引入别的科目
+        keep_acc = text_accounting(g, [r for r in rels + extra if r['report_id'] == rid])
+        drop_accounting(g, keep_acc)
         concepts = [n for n in g if (layer_of(n, tb) or 0) >= 3]
         conn = connected(g)
-        info.update(n_relations=sum(r['report_id'] == rid for r in rels), n_rejected=rejected[rid],
+        g0 = unmerged_graph([r for r in kept if r['report_id'] == rid], groups['accounting'][rid], tb, cut[rid])[0]
+        drop_accounting(g0, keep_acc)
+        info.update(n_accounting=len(keep_acc), n_subgraphs=len(subgraphs(g)), n_relations=sum(r['report_id'] == rid for r in rels),
+                    n_rejected=rejected[rid],
                     n_dangling=sum(r['report_id'] == rid and not (r['cause'] and r['effect']) for r in rels),
                     n_dangling_resolved=sum(r['report_id'] == rid for r in extra),
                     n_accounting_text=len(groups['accounting'][rid]) - len(acc_unmatched),
                     reach_before=sum(n in conn for n in concepts) / max(len(concepts), 1))
         built[rid] = {'g': g, 'info': info, 'removed': removed, 'acc_unmatched': acc_unmatched, 'isolated': isolated,
-                      'merged': merged, 'n_concepts': len(concepts), 'n_reach': sum(n in conn for n in concepts)}
+                      'merged': merged, 'n_concepts': len(concepts), 'n_reach': sum(n in conn for n in concepts),
+                      'g0': g0, 'ref_text': g.copy()}  # 阶段图用：缩减之前的原文图、补全之前缩减后的图
     n_concepts = sum(b['n_concepts'] for b in built.values())
     log(f'建图：删掉孤立概念 {sum(len(b["isolated"]) for b in built.values())} 个，剩余概念 {n_concepts} 个，'
-        f'补全前能连到公司估值的 {sum(b["n_reach"] for b in built.values()) / max(n_concepts, 1):.0%}')
+        f'保留原文中出现过的会计科目平均每篇 {np.mean([b["info"]["n_accounting"] for b in built.values()]):.1f} 个，'
+        f'补全前能连到公司估值的 {sum(b["n_reach"] for b in built.values()) / max(n_concepts, 1):.0%}，'
+        f'走不到估值的子图 {sum(b["info"]["n_subgraphs"] for b in built.values())} 个')
 
-    # 3. 概念补全
+    # 3. 子图补全：只给走不到估值的子图补边，已经能沿原文关系走到估值的概念不再补全
     graphs = {rid: built[rid]['g'] for rid in report_ids}
-    complete_concepts(graphs, tables, hints, by_rid, metas, out_dir, llm, prompts, workers)
+    complete_subgraphs(graphs, tables, hints, by_rid, metas, out_dir, llm, prompts, workers)
     for rid in report_ids:
         built[rid]['removed'] += break_cycles(graphs[rid])
+        built[rid].update(added=[(u, v, dict(d)) for u, v, d in graphs[rid].edges(data=True) if d['order'] >= COMPLETION_ORDER],
+                          ref_done=graphs[rid].copy())
 
     # 4（后半）. 剪枝：去掉有方向一致的更长链路的直连（方向相反的保留并标记）；再删掉没有任何下层概念连入的会计科目
     for rid in report_ids:
-        built[rid].update(replaced=prune_shortcuts(graphs[rid]), pruned=prune_accounting(graphs[rid]))
-    log(f'剪枝完成：删掉有方向一致的更长链路的直连 {sum(len(b["replaced"]) for b in built.values())} 条，'
+        built[rid].update(replaced=prune_shortcuts(graphs[rid], layer_map(graphs[rid], tables[rid])),
+                          pruned=prune_accounting(graphs[rid]))
+    log(f'剪枝完成：删掉有方向一致、先往上走的更长链路的直连 {sum(len(b["replaced"]) for b in built.values())} 条，'
         f'只有方向相反的链路而保留的直连 {sum(bool(d["conflict_path"]) for g in graphs.values() for *_, d in g.edges(data=True))} 条；'
         f'删掉没有下层概念连入的会计科目平均每篇 {np.mean([len(b["pruned"]) for b in built.values()]):.0f} 个')
 
@@ -1472,17 +1680,30 @@ def main(paras_path, out_dir, limit=None, embed_model=EMBED_MODEL, html_name='re
     mapping, global_table = global_dedup(graphs, tables, embed_model, out_dir, llm, prompts, workers)
 
     # 6. 输出
-    records, edge_rows = [], []
+    records, edge_table = [], []
     for rid in report_ids:
         b = built[rid]
         up = lambda d: {k: sum((v for x, v in d.items() if tops[rid].get(x, x) == k), []) for k in {tops[rid].get(x, x) for x in d}}
         notes = {'unresolved': up(unresolved[rid]), 'attached': up(attached[rid]), 'hints': hints[rid], 'replaced': b['replaced'],
                  'removed': b['removed'], 'pruned': b['pruned'], 'isolated': b['isolated'], 'merged': b['merged'],
+                 'parallel': parallel_by[rid], 'cut': cut[rid],
                  'reverse': [rel_row(r) for r in groups['reverse'][rid]], 'accounting': [rel_row(r) for r in b['acc_unmatched']]}
         rec = graph_record(graphs[rid], metas[rid], b['info'], tables[rid], mapping, notes)
+        # 前三个阶段（第 4 阶段即上面的最终图）：第 1 步的概念表和包含关系、第 2 步的原文边、第 3 步补全后，都在包含关系缩减之前；
+        # 第 2、3 阶段的节点相同（会计层只有原文中出现过的科目），第 3 阶段只是多了补全的边
+        tb, g0 = tables[rid], b['g0']
+        g1 = build_graph(contain_items(tb, tb))[0]
+        g1.add_nodes_from(tb)
+        g2, g3 = g0.copy(), g0.copy()
+        g3.add_edges_from(b['added'])
+        rec['stages'] = [
+            stage_record('概念分层', g1, tb, mapping, tops[rid], extra={'n_part_of': sum(bool(t['parent']) for t in tb.values())}),
+            stage_record('原文连边', g2, tb, mapping, tops[rid], b['ref_text'], extra={'n_isolated': len(b['isolated'])}),
+            stage_record('补全', g3, tb, mapping, tops[rid], b['ref_done'],
+                         extra={'n_subgraphs': b['info']['n_subgraphs'], 'added': Counter(d['origin'] for *_, d in b['added'])})]
         records.append(rec)
         node = {n['id']: n for n in rec['nodes']}
-        edge_rows += [{'report_id': rid, 'source': e['source'], 'target': e['target'], 'source_global': node[e['source']]['label'],
+        edge_table += [{'report_id': rid, 'source': e['source'], 'target': e['target'], 'source_global': node[e['source']]['label'],
                        'target_global': node[e['target']]['label'], 'source_layer': node[e['source']]['layer'],
                        'target_layer': node[e['target']]['layer'], 'direction': e['direction'], 'origin': e['origin'],
                        'weight': e['weight'], 'evidence': ' | '.join(e['evidence']), 'para_ids': ','.join(map(str, e['para_ids']))}
@@ -1498,16 +1719,16 @@ def main(paras_path, out_dir, limit=None, embed_model=EMBED_MODEL, html_name='re
     (out_dir / 'report_graphs.json').write_text(
         json.dumps({'root': ROOT, 'layers': LAYER_NAMES, 'model': env['MODEL'], 'embed_model': embed_model, 'reports': records,
                     'global_names': global_table}, ensure_ascii=False, indent=1), encoding='utf-8')
-    write_parquet(edge_rows, out_dir / 'edges.parquet',
+    write_parquet(edge_table, out_dir / 'edges.parquet',
                   ['report_id', 'source', 'target', 'source_global', 'target_global', 'source_layer', 'target_layer',
                    'direction', 'origin', 'weight', 'evidence', 'para_ids'])
     write_parquet(node_rows, out_dir / 'nodes.parquet', ['node', 'layer', 'n_reports', 'members'])
 
-    from src import plot_report_logic
+    from research_report import plot_report_logic
     plot_report_logic.main(out_dir / 'report_graphs.json', out_dir / html_name)
 
     u = llm.usage
     reach = [r['stats']['reach'] for r in records]
-    log(f'===== 结束：{len(records)} 篇研报；共 {len(node_rows)} 个全局节点、{len(edge_rows)} 条边；'
+    log(f'===== 结束：{len(records)} 篇研报；共 {len(node_rows)} 个全局节点、{len(edge_table)} 条边；'
         f'概念连到公司估值的比例平均 {np.mean(reach):.0%}；调用 {u["calls"]} 次（不合格重试 {u["retries"]} 次），'
         f'输入 {u["prompt_tokens"]} tokens，输出 {u["completion_tokens"]} tokens =====')

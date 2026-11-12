@@ -1,17 +1,7 @@
 """调用大模型对MD&A做逐句中性化改写。
 
-适用于任何兼容 OpenAI Chat Completions 接口的模型（智谱GLM、DeepSeek、通义千问、Kimi、OpenAI等），
-换模型只需修改项目根目录的 .env：
-    API_KEY=...                必填
-    BASE_URL=...               必填，如 https://open.bigmodel.cn/api/paas/v4（写到 /chat/completions 也可以）
-    MODEL=...                  必填，如 glm-4.7-flash
-    REASONING_EFFORT=low       可选，思考强度（不支持该参数的模型请留空）
-    TEMPERATURE=0.2            可选，默认 0.2
-    MAX_TOKENS=8192            可选，单次最大输出token数，默认不传
-    CONCURRENCY=50             可选，同时处理的文章数，默认 50（每篇文章一个任务，批次按顺序请求，
-                               所以这也是同时在途的最大请求数）
-    EXTRA_BODY={"thinking": {"type": "disabled"}}   可选，厂商特有参数（JSON），原样并入请求体
-    MERGE_SYSTEM=1             可选，把 system prompt 拼进 user 消息发送（用于会丢弃 system 消息的中转站）
+大模型接口、.env 配置项和进度日志见 common/llm_client.py；CONCURRENCY 在这里表示同时处理的文章数，
+默认 50（每篇文章一个任务，批次按顺序请求，所以这也是同时在途的最大请求数）。
 
 流程：每篇文章切句并在全文内连续编号 -> 每 BATCH_SIZE 句一批，按顺序调用模型 ->
 校验返回的 JSON（id 与输入一一对应、无空句），不合格就重试，多次失败则把这一批拆成两半再试 ->
@@ -23,68 +13,24 @@
 coverage_year 限定为该年内有一年后(fy1)预测（Y 年年报传 Y-1）；可传入 st_path、st_year 剔除该年被 ST 过的股票（Y 年年报传 Y-1）。
 进度（时间、完成篇数、失败、预计剩余时间）同时追加写入 <输出目录>/_progress.log。
 
-用法：在 main.py 中设置 TASK = 'neutralize_llm'
+用法：在 mda_tone/main.py 中设置 TASK = 'neutralize_llm'
 """
 import json
-import random
 import re
-import threading
 import time
-import urllib.error
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-PROMPT_FILE = ROOT / 'prompts' / 'mda_neutralize_prompt.md'
+from common.llm_client import (STOP, ContentFilterError, FatalAPIError, LLMClient, NUM_RE, load_env, log,
+                               set_log_path)
+from mda_tone.config import PROMPT_DIR
+
+PROMPT_FILE = PROMPT_DIR / 'mda_neutralize_prompt.md'
 SENTENCE_RE = re.compile(r'[^。！？；]+[。！？；]')
-NUM_RE = re.compile(r'\d+(?:[.,]\d+)*')
 BATCH_SIZE = 100  # 每次调用改写的句数；实测到 160 句未见截断或语调变弱，按次计费时批次越大越省
 MAX_RETRIES = 4  # 同一批内容不合格时的重试次数，用尽后拆成两半
 DEFAULT_CONCURRENCY = 50  # .env 未设置 CONCURRENCY 时同时处理的文章数
 BSE_PREFIXES = ('43', '83', '87', '88', '92')  # 北交所（含原新三板精选层）股票代码前缀
-RETRYABLE_HTTP = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}  # 52x：Cloudflare 网关与源站之间的临时错误
-LOG_PATH = None  # 进度日志文件，main() 中设为 <输出目录>/_progress.log
-_log_lock = threading.Lock()
-
-
-def log(msg):
-    """打印并追加写入进度日志（带时间戳），多线程安全。"""
-    line = f'{time.strftime("%Y-%m-%d %H:%M:%S")} {msg}'
-    with _log_lock:
-        print(line, flush=True)
-        if LOG_PATH:
-            with open(LOG_PATH, 'a', encoding='utf-8') as f:
-                f.write(line + '\n')
-
-
-# 以下错误码按智谱设置，换模型时按需补充（匹配错误响应体中的文本）
-CONTENT_FILTER_CODES = ('"1301"',)  # 内容安全拦截：重试、拆半，单句仍被拦截则保留原句
-# 余额不足/无可用资源包（智谱 1113；new-api 类中转站 insufficient_user_quota；laneai insufficient_balance）：
-# 重试无意义，立即停止全部任务；已完成的批次保留在 _partial 中，充值后重新运行即可接上
-FATAL_CODES = ('"1113"', 'insufficient_user_quota', 'insufficient_balance')
-STOP = threading.Event()  # 遇到致命错误时置位，所有线程尽快退出
-
-
-class ContentFilterError(RuntimeError):
-    """模型服务方的内容安全过滤拦截了输入或输出。"""
-
-
-class FatalAPIError(RuntimeError):
-    """余额不足等无法通过重试解决的错误，需要人工处理后重新运行。"""
-
-
-def load_env(path=ROOT / '.env'):
-    env = {}
-    for line in path.read_text(encoding='utf-8').splitlines():
-        line = line.strip()
-        if line and not line.startswith('#') and '=' in line:
-            k, v = line.split('=', 1)
-            env[k.strip()] = v.strip().strip('"\'')
-    for k in ('API_KEY', 'BASE_URL', 'MODEL'):
-        if not env.get(k):
-            raise SystemExit(f'.env 缺少 {k}')
-    return env
 
 
 def load_prompts():
@@ -100,62 +46,6 @@ def load_prompts():
 def split_sentences(text):
     """逐行切句；不以句号等结尾的小标题不参与改写。"""
     return [s.strip() for line in text.splitlines() for s in SENTENCE_RE.findall(line) if len(s) >= 5]
-
-
-class LLMClient:
-    def __init__(self, env):
-        base = env['BASE_URL'].rstrip('/')  # 兼容 BASE_URL 写到 /v1 或直接写完整的 /chat/completions
-        self.url = base if base.endswith('/chat/completions') else base + '/chat/completions'
-        self.headers = {'Authorization': f'Bearer {env["API_KEY"]}', 'Content-Type': 'application/json',
-                        'User-Agent': 'llm-project-neutralizer/1.0'}  # 部分服务的 Cloudflare 会拒绝 urllib 默认 UA（403/1010）
-        self.body = {'model': env['MODEL'], 'temperature': float(env.get('TEMPERATURE') or 0.2)}
-        if env.get('REASONING_EFFORT'):
-            self.body['reasoning_effort'] = env['REASONING_EFFORT']
-        if env.get('MAX_TOKENS'):
-            self.body['max_tokens'] = int(env['MAX_TOKENS'])
-        if env.get('EXTRA_BODY'):
-            self.body.update(json.loads(env['EXTRA_BODY']))
-        self.http_retries = 0  # 因限流、服务端错误或网络问题而重发的次数（多线程下为近似值）
-        self.timeouts = 0  # 其中网络错误/超时的次数
-        self.merge_system = env.get('MERGE_SYSTEM', '').lower() in ('1', 'true', 'yes')
-
-    def chat(self, system, user, timeout=300):
-        """返回 (回复内容, finish_reason, usage)。限流、服务端错误和网络错误会退避后无限重试；
-        余额不足等致命错误则置位 STOP 并抛出 FatalAPIError。"""
-        if self.merge_system:  # 部分中转站会丢弃 system 消息：把它拼到 user 消息前面
-            messages = [{'role': 'user', 'content': f'{system}\n\n---\n\n{user}'}]
-        else:
-            messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]
-        data = json.dumps({**self.body, 'messages': messages}).encode('utf-8')
-        wait = 5
-        while True:
-            if STOP.is_set():
-                raise FatalAPIError('任务已因致命错误停止')
-            try:
-                req = urllib.request.Request(self.url, data=data, headers=self.headers)
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    r = json.load(resp)
-                choice = r['choices'][0]
-                return choice['message'].get('content') or '', choice.get('finish_reason'), r.get('usage') or {}
-            except urllib.error.HTTPError as e:
-                body = e.read().decode('utf-8', 'replace')[:300]
-                if e.code in (401, 402, 403) or any(c in body for c in FATAL_CODES):
-                    STOP.set()
-                    raise FatalAPIError(f'HTTP {e.code}: {body}') from None
-                if e.code not in RETRYABLE_HTTP:
-                    if any(c in body for c in CONTENT_FILTER_CODES):
-                        raise ContentFilterError('内容安全过滤') from None
-                    raise RuntimeError(f'HTTP {e.code}: {body}') from None
-                self.http_retries += 1
-                if self.http_retries <= 3:  # 只记录前几次，便于判断触发的是哪种限制
-                    log(f'HTTP {e.code}，退避后重试：{body[:200]}')
-            except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError) as e:
-                self.http_retries += 1
-                self.timeouts += 1
-                if self.timeouts <= 3 or self.timeouts % 50 == 0:  # 超时/断网会静默重发，这里留下记录
-                    log(f'网络错误或超时（累计 {self.timeouts} 次），退避后重试：{type(e).__name__} {e}')
-            STOP.wait(wait + random.uniform(0, wait))  # 退避等待（加随机抖动）；STOP 置位时立即醒来
-            wait = min(wait * 2, 120)
 
 
 def parse_batch(content, batch):
@@ -290,11 +180,10 @@ def main(mda_dir, out_dir, year, limit=50, coverage_path=None, coverage_year=Non
     coverage_year：只保留该年内有一年后(fy1)预测的股票（Y 年年报传 Y-1），None 表示任意年份出现过即可。
     st_path：ST 状态 parquet 路径；给出时剔除 st_year 年内被 ST 过的股票（Y 年年报传 Y-1），None 表示不过滤。
     exclude_bse：True 时剔除北交所股票。"""
-    global LOG_PATH
     env = load_env()
     out_dir = Path(out_dir)
     (out_dir / '_partial').mkdir(parents=True, exist_ok=True)
-    LOG_PATH = out_dir / '_progress.log'
+    set_log_path(out_dir / '_progress.log')
     files = sorted(Path(mda_dir).glob('*.txt'))
     if coverage_path:
         covered = load_covered_codes(coverage_path, coverage_year)

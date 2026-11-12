@@ -20,21 +20,33 @@ from pathlib import Path
 import numpy as np
 
 N_BINS = 50  # 文章相对位置分成多少段
+csv.field_size_limit(10 ** 9)  # 个别句子可能超过 csv 默认的字段长度上限
 
 
 def load_docs(compare_dir):
     docs = list(csv.DictReader(open(compare_dir / 'tone_by_doc.csv', encoding='utf-8-sig')))
     return {'codes': [d['code'] for d in docs], 'names': [d['company'] for d in docs],
-            'diffs': [float(d['tone_diff']) for d in docs]}
+            'diffs': [float(d['tone_diff']) for d in docs],
+            'years': sorted({d['year'] for d in docs if d.get('year')})}
+
+
+def years_label(years):
+    """页面上显示的数据年份，如 '2021–2023 年 '；旧结果文件没有 year 列时为空。"""
+    if not years:
+        return ''
+    ys = [int(y) for y in years]
+    if len(ys) == 1:
+        return f'{ys[0]} 年 '
+    return f'{ys[0]}–{ys[-1]} 年 ' if ys == list(range(ys[0], ys[-1] + 1)) else '、'.join(years) + ' 年 '
 
 
 def position_profile(compare_dir, n_bins=N_BINS):
     """返回每段的汇总统计（中位数、平均数、两种95%区间、文章数）。"""
-    sents = defaultdict(list)  # 股票代码 -> [(句子id, 语调变化)]
-    with open(compare_dir / 'tone_by_sentence.csv', encoding='utf-8-sig') as f:
+    sents = defaultdict(list)  # (年份, 股票代码) -> [(句子id, 语调变化)]；同一公司不同年份是不同的文章
+    with open(compare_dir / 'tone_by_sentence.csv', encoding='utf-8-sig', newline='') as f:
         for r in csv.DictReader(f):
             d = (float(r['pos_neutral']) - float(r['neg_neutral'])) - (float(r['pos_orig']) - float(r['neg_orig']))
-            sents[r['code']].append((int(r['id']), d))
+            sents[r.get('year'), r['code']].append((int(r['id']), d))
 
     M = np.full((len(sents), n_bins), np.nan)  # 每篇文章 × 每段的平均语调变化，空段为 NaN
     for k, rows in enumerate(sents.values()):
@@ -64,6 +76,7 @@ def main(compare_dir, out_name='tone_change_distribution.html'):
     print('读取数据……')
     doc_data, pos_data = load_docs(compare_dir), position_profile(compare_dir)
     html = (HTML_TEMPLATE
+            .replace('/*YEARS*/', years_label(doc_data['years']))
             .replace('/*DOC_DATA*/null', json.dumps(doc_data, ensure_ascii=False, separators=(',', ':')))
             .replace('/*POS_DATA*/null', json.dumps(pos_data, ensure_ascii=False, separators=(',', ':'))))
     out = compare_dir / out_name
@@ -145,7 +158,7 @@ HTML_TEMPLATE = r'''<!doctype html>
 <body>
 <main>
   <h1>中性化改写前后的语调变化分布</h1>
-  <p class="lead">数据：2024 年 A 股年报 MD&amp;A，GLM 中性化改写，中文 FinBERT 逐句分类。
+  <p class="lead">数据：/*YEARS*/A 股年报 MD&amp;A，GLM 中性化改写，中文 FinBERT 逐句分类。
     语调变化 = 改写后 − 改写前，负值表示改写后语调下降。</p>
 
   <section id="sec-doc">
