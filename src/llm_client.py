@@ -12,11 +12,10 @@
     EXTRA_BODY={"thinking": {"type": "disabled"}}   可选，厂商特有参数（JSON），原样并入请求体
     MERGE_SYSTEM=1             可选，把 system prompt 拼进 user 消息发送（用于会丢弃 system 消息的中转站）
 
-使用方：src/report_logic.py、src/report_compare.py、src/experiments/report_kg.py。
+使用方：src/report_logic.py、src/report_compare.py。
 """
 import json
 import random
-import re
 import threading
 import time
 import urllib.error
@@ -24,7 +23,6 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent  # 仓库根目录，.env 放在这里
-NUM_RE = re.compile(r'\d+(?:[.,]\d+)*')
 RETRYABLE_HTTP = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}  # 52x：Cloudflare 网关与源站之间的临时错误
 # 以下错误码按智谱设置，换模型时按需补充（匹配错误响应体中的文本）
 CONTENT_FILTER_CODES = ('"1301"',)  # 内容安全拦截：由调用方决定重试、拆半或保留原句
@@ -33,7 +31,7 @@ CONTENT_FILTER_CODES = ('"1301"',)  # 内容安全拦截：由调用方决定重
 FATAL_CODES = ('"1113"', 'insufficient_user_quota', 'insufficient_balance')
 STOP = threading.Event()  # 遇到致命错误时置位，所有线程尽快退出
 
-LOG_PATH = None  # 进度日志文件，调用方用 set_log_path() 设为 <输出目录>/_progress.log
+LOG_PATH = None  # 进度日志文件，调用方用 set_log_path() 设为 <输出目录>/cache/progress.log
 _log_lock = threading.Lock()
 
 

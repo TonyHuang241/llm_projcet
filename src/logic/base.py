@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 
 from src.llm_client import ContentFilterError, FatalAPIError, LLMClient, log
 from src import fin_items
-from src.config import PROMPT_DIR
+from src.config import PROMPT_DIR, OutDir
 
 PROMPT_FILE = PROMPT_DIR / 'report_logic_prompt.md'
 
@@ -342,11 +342,12 @@ _MISSING = object()
 
 
 class Step:
-    """一类大模型调用。结果按输入指纹（这一步 prompt 的指纹 + 调用方给出的输入文字）缓存在输出目录的 jsonl 文件中，
+    """一类大模型调用。结果按输入指纹（这一步 prompt 的指纹 + 调用方给出的输入文字）缓存在输出目录 cache/ 下的 jsonl 文件中，
     重新运行只补做缺少的部分；fields 为缓存行中存放结果的字段（多个字段时结果是同样长度的元组）。"""
 
     def __init__(self, ctx, cache_file, step, system=None, user=None, sig=None, fields=('result',)):
-        self.ctx, self.path, self.fields = ctx, ctx.out_dir / cache_file, fields
+        self.ctx, self.path, self.fields = ctx, OutDir(ctx.out_dir).cache / cache_file, fields
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.system = ctx.prompts[system or f'{step}-System']
         self.user = ctx.prompts[user or f'{step}-User']
         self.sig = prompt_sig(ctx.prompts, *(sig or (step,)))

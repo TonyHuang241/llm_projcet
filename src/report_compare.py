@@ -1,4 +1,4 @@
-"""对比同一家公司不同研报的估值逻辑框架：把 report_logic 输出的逻辑图（report_graphs.json）转成邻接矩阵，算逐对、逐篇的
+"""对比同一家公司不同研报的估值逻辑框架：把 report_logic 输出的逻辑图（输出目录的 data/graphs/）转成邻接矩阵，算逐对、逐篇的
 差异指标，供后续回归使用。
 
 节点对齐分三个粒度：
@@ -55,20 +55,20 @@ report_metrics.parquet：每篇一行，与“同行”比较。同行默认是�
 
 themes.parquet：company、stock_code、theme、theme_definition、concept、layer、n_reports。
 
-用法：先跑过 report_logic，再在 main.py 中设置 TASK = 'report_compare'。
+用法：先抽取逻辑链，再运行 python extract_logic_chain.py --task compare；结果写到输出目录的 data/compare/。
 """
 import itertools
-import json
 import math
 from collections import Counter, defaultdict
 from datetime import datetime
-from pathlib import Path
 
 import networkx as nx
 import numpy as np
 
+from src.config import OutDir
 from src.llm_client import load_env, log, set_log_path
 from src.logic.base import ROOT, Ctx, Step, norm_name, parse_json, short, write_parquet
+from src.logic.output import read_graphs
 
 TEXT_EDGES = ('extracted', 'bridged', 'preset')  # edge_set='text' 时保留的边
 LAYERS = (1, 2, 3, 4, 5)
@@ -400,17 +400,18 @@ def report_metrics(x, group, theme_names, peers, window_days):
 
 # ==================== 主流程 ====================
 
-def main(graphs_path, out_dir, edge_set='all', peers='all', window_days=None):
-    """graphs_path：report_logic 输出的 report_graphs.json；edge_set：'all' 全部边 / 'text' 去掉逻辑补全边；
+def main(out_dir, edge_set='all', peers='all', window_days=None):
+    """out_dir：report_logic 的输出目录（读其中的 data/graphs/，结果写到 data/compare/）；edge_set：'all' 全部边 / 'text' 去掉逻辑补全边；
     peers：'all' 同公司其他全部研报 / 'prior' 只用更早发布的（window_days 限定往前多少天，None 为不限）。"""
     if edge_set not in ('all', 'text') or peers not in ('all', 'prior'):
         raise SystemExit(f'edge_set 只能是 all 或 text，peers 只能是 all 或 prior，收到 {edge_set!r}、{peers!r}')
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    set_log_path(out_dir / '_progress.log')
+    out = OutDir(out_dir).make()
+    data = read_graphs(out.root)
+    set_log_path(out.log)
     env = load_env()
-    ctx = Ctx(env, out_dir, {})
-    data = json.loads(Path(graphs_path).read_text(encoding='utf-8'))
+    ctx = Ctx(env, out.root, {})
+    out_dir = out.compare
+    out_dir.mkdir(parents=True, exist_ok=True)
     companies = defaultdict(list)
     for rec in sorted(data['reports'], key=lambda r: (r['date'], r['report_id'])):
         companies[rec['stock_code'] or rec['company']].append(rec)

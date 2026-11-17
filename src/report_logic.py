@@ -4,7 +4,7 @@
 五层：1 公司估值、2 会计层（这两层预置，见 src/fin_items.py）、3 经营指标、4 公司经营与行业、5 外部环境（只放宏观和政策因素）。
 边只能从层号大的指向层号小的（可以跨层），第 3-5 层内部也可以有原文陈述的关系。
 
-输入是 src/report_text.py 写出的段落 parquet（也可以换成自己处理好的文本，至少含 report_id、para_id、text 三列）；
+输入是 clear_txt.py（src/report_text.py）写出的段落 parquet（也可以换成自己处理好的文本，至少含 report_id、para_id、text 三列）；
 读入时会再剔除一遍风险提示。大模型调用都走 .env 中配置的接口（见 src/llm_client.py）。流程：
   1. 概念分层填表（建表）：每篇按顺序分块通读，滚动维护“本篇概念表”（规范名、别名、定义、层级、类型）。
   2. 原文连边（抽取）：每段一次调用，抽出原文明说的一跳关系并逐字核对引文；表里没有的新概念先记下。
@@ -16,14 +16,15 @@
      原文写明的补原文边（逐字核对），没写的给每个终点补一条逻辑边（闭集选择，不造新概念）。
   4. 收尾：去环（先删逻辑边）、剪掉有方向一致的更长链路的直连、删掉没有下层概念连入的会计科目。
   5. 全局去重（归一）：各篇同一层的概念用 BGE 向量和名称包含取候选对，交给大模型判断，只加全局名称、不改图。
-  6. 输出：report_graphs.json（含缩减之前三个阶段的图）、edges/nodes/relations.parquet、可视化 HTML。
+  6. 输出（布局见 src/config.py 的 OutDir）：入口页面 研报逻辑图.html；data/graphs/ 下每篇研报一个逻辑图数据文件
+     （含缩减之前三个阶段的图），页面选中一篇研报时才读取它的数据、计算布局并绘图；data/ 下 edges/nodes/relations.parquet。
 边的 origin：extracted 段内原文 / bridged 跨段原文（悬挂补全或子图补全，引文经程序核对）/ logic 逻辑补全 / preset 预置的会计关系。
-各步的大模型结果都缓存在输出目录的 *_cache.jsonl 中，重新运行只补做缺少的部分（输入或这一步的 prompt 变了会自动重新调用）。
+各步的大模型结果都缓存在输出目录的 cache/*_cache.jsonl 中（进度日志在 cache/progress.log），重新运行只补做缺少的部分（输入或这一步的 prompt 变了会自动重新调用）。
 
 代码分在 src/logic/ 下：base（常量、大模型调用与缓存、校验工具）、extract（第 1、2 步）、graph（包含关系缩减、
 建图、剪枝）、complete（第 3 步）、output（第 5、6 步）；这里只负责按顺序调用。
 
-用法：在 main.py 中设置 TASK = 'report_logic'
+用法：在仓库根目录运行 python extract_logic_chain.py（输入、输出和试跑篇数在该脚本开头设置）
 """
 from collections import defaultdict
 from pathlib import Path
@@ -31,6 +32,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
+from src.config import OutDir
 from src.llm_client import load_env, log, set_log_path
 from src.logic.base import Ctx, Report, layer_of, write_parquet
 from src.logic.complete import complete_subgraphs
@@ -67,11 +69,13 @@ def load_reports(paras_path, limit):
     return reports, n_risk
 
 
-def main(paras_path, out_dir, limit=None, embed_model=EMBED_MODEL, html_name='report_logic_graphs.html'):
-    """paras_path：段落 parquet（report_text.py 的输出或自备文本）；limit：只处理前多少篇研报（按 report_id 排序），None 为全部。"""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    set_log_path(out_dir / '_progress.log')
+def main(paras_path, out_dir, limit=None, embed_model=EMBED_MODEL):
+    """paras_path：段落 parquet（clear_txt.py 的输出或自备文本）；limit：只处理前多少篇研报（按 report_id 排序），None 为全部。"""
+    if not Path(paras_path).exists():
+        raise SystemExit(f'找不到段落文件 {paras_path}，请先运行 python clear_txt.py，或把输入换成已有的段落 parquet')
+    out = OutDir(out_dir).make()
+    out_dir = out.root
+    set_log_path(out.log)
     env = load_env()
     reports, n_risk = load_reports(paras_path, limit)
     ctx = Ctx(env, out_dir, {r.rid: r.meta for r in reports})
@@ -88,7 +92,7 @@ def main(paras_path, out_dir, limit=None, embed_model=EMBED_MODEL, html_name='re
     write_parquet([{**{k: x[k] for k in ('report_id', 'para_id', 'cause', 'direction', 'effect', 'evidence')},
                     'cause_layer': layer_of(x['cause'], r.table), 'effect_layer': layer_of(x['effect'], r.table)}
                    for r in reports for x in r.rels],
-                  out_dir / 'relations.parquet', ['report_id', 'para_id', 'cause', 'direction', 'effect', 'evidence'])
+                  out.data / 'relations.parquet', ['report_id', 'para_id', 'cause', 'direction', 'effect', 'evidence'])
     for r in reports:
         r.complete = [{**x, 'origin': 'extracted', 'evidence': [x['evidence']], 'para_ids': [x['para_id']]}
                       for x in r.rels if x['cause'] and x['effect']]
@@ -109,12 +113,11 @@ def main(paras_path, out_dir, limit=None, embed_model=EMBED_MODEL, html_name='re
     mapping, global_table = global_dedup(ctx, reports, embed_model)
 
     # 6. 输出
-    records, node_rows, edge_table = write_outputs(reports, mapping, global_table, out_dir, env['MODEL'], embed_model)
-    from src.viz import plot_report_logic
-    plot_report_logic.main(out_dir / 'report_graphs.json', out_dir / html_name)
+    stats, node_rows, edge_table = write_outputs(reports, mapping, global_table, out_dir, env['MODEL'], embed_model)
 
     u = ctx.llm.usage
-    reach = [rec['stats']['reach'] for rec in records]
-    log(f'===== 结束：{len(records)} 篇研报；共 {len(node_rows)} 个全局节点、{len(edge_table)} 条边；'
+    reach = [x['reach'] for x in stats]
+    log(f'===== 结束：{len(stats)} 篇研报；共 {len(node_rows)} 个全局节点、{len(edge_table)} 条边；'
         f'概念连到公司估值的比例平均 {np.mean(reach):.0%}；调用 {u["calls"]} 次（不合格重试 {u["retries"]} 次），'
         f'输入 {u["prompt_tokens"]} tokens，输出 {u["completion_tokens"]} tokens =====')
+    log(f'逻辑图入口：{out.viewer}（双击打开，选中研报时才读取数据并绘图）；结果数据在 {out.data}')

@@ -1,4 +1,8 @@
-"""把 report_logic.py 输出的 report_graphs.json 画成单文件 HTML：每篇研报一张五层逻辑图。
+<!doctype html>
+<!--
+研报逻辑图查看页面（静态文件，由 src/logic/output.py 原样复制到输出目录最外层，双击即可打开）。
+页面本身不含任何研报的数据：打开时只读目录 data/graphs/index.js，选中一篇研报时才用 <script> 读取它的数据文件
+（data/graphs/xx/….js），当场计算分层布局并绘图；“全局名称表”也在点开时才读取。所以研报再多，页面也不会变大。
 
 左侧按公司列出研报，点选后在中间画图：公司估值在最上方，往下依次是会计层、经营指标、公司经营与行业、外部环境
 （左侧标出层名；同一层内有原文关系的，被影响的一方排在上面），箭头由影响因素指向被影响因素：
@@ -10,26 +14,18 @@
   黄色为既有正向路径又有负向路径，灰色为没有连到估值；会计层节点边框加粗，虚线边框的节点没有连到估值（子图补全失败时出现）。
 图上方可以切换四个阶段：① 概念分层（第 1 步的概念表和包含关系）、② 原文连边、③ 补全、④ 包含关系缩减（最终结果，含剪枝）；
 前三个阶段在缩减之前，一个概念是否连到估值按它所在的包含关系树判断（上位概念经下位概念的边连到估值也算）。
-点击节点会突出它的上游因素和下游路径，右侧显示层级、定义、别名、包含关系、缩减时并入的下位概念、原文线索、悬挂记录，以及因另有更长链路而剪掉的直连；
-点击边显示原文证据（逻辑补全边显示理由）和段落编号。
+点击节点会突出它的上游因素和下游路径，右侧显示层级、定义、别名、包含关系、缩减时并入的下位概念、原文线索、悬挂记录，
+以及因另有更长链路而剪掉的直连；点击边显示原文证据（逻辑补全边显示理由）和段落编号。
 分层坐标自己计算（vis 自带的分层布局遇到多个子图时节点间距过大），多个子图按大小排成若干行或列；
-布局方向默认自动选择能把图放得更大的一种（估值在上或在右），也可以手动切换。另有“全局名称表”页，用来检查跨研报去重的结果。
+布局方向默认自动选择能把图放得更大的一种（估值在上或在右），也可以手动切换。
 需要联网加载 vis-network（jsdelivr CDN）。
-
-用法：report_logic.main 结束时自动调用；只想重画时在 main.py 中设置 TASK = 'report_logic_html'
-"""
-import json
-from pathlib import Path
-
-VIS_URL = 'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js'
-
-TEMPLATE = r'''<!doctype html>
+-->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>研报逻辑图</title>
-<script src="__VIS_URL__"></script>
+<script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 <style>
 :root {
   --bg: #f6f7f9; --panel: #ffffff; --ink: #1f2328; --muted: #656d76; --line: #d8dee4; --accent: #2f6feb;
@@ -66,6 +62,9 @@ main { flex: 1; display: flex; min-height: 0; }
 .rep:hover { background: var(--bg); }
 .rep.on { background: var(--accent); color: #fff; }
 .rep small { display: block; opacity: .75; font-size: 11px; }
+.more { color: var(--muted); font-size: 12px; padding: 8px; }
+#count { color: var(--muted); font-size: 12px; }
+.msg { padding: 16px; color: var(--muted); }
 #center { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #meta { padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 13px; }
 #meta .t { font-weight: 600; font-size: 14px; }
@@ -94,6 +93,7 @@ main { flex: 1; display: flex; min-height: 0; }
 <body>
 <header>
   <h1>研报逻辑图</h1>
+  <span id="count"></span>
   <div class="tabs"><button id="tab-graph" class="on">逻辑图</button> <button id="tab-table">全局名称表</button></div>
   <div class="legend">
     <span><i style="border-color:var(--pos)"></i>正向</span>
@@ -110,7 +110,7 @@ main { flex: 1; display: flex; min-height: 0; }
   </div>
 </header>
 <main>
-  <nav id="side"><input id="q" placeholder="筛选研报或节点名"><div id="list"></div></nav>
+  <nav id="side"><input id="q" placeholder="筛选：公司、代码、券商、日期、标题"><div id="list"></div></nav>
   <section id="center">
     <div id="meta"></div>
     <div id="tools">
@@ -125,22 +125,36 @@ main { flex: 1; display: flex; min-height: 0; }
   <section id="table"></section>
   <aside id="detail"><div class="ev">点击图中的节点或边查看详情。</div></aside>
 </main>
-<script id="data" type="application/json">__DATA__</script>
 <script>
-const DATA = JSON.parse(document.getElementById('data').textContent);
-const ROOT = DATA.root;
+// 数据文件都是“函数名(JSON);”的形式，用 <script> 读取（直接双击打开页面时浏览器不允许 fetch 本地文件）
+const GRAPH_DIR = 'data/graphs/';
+const MAX_LIST = 300, MAX_ROWS = 2000, MAX_CACHE = 30;  // 左侧最多列出的研报数、名称表最多显示的行数、内存里保留的图数
+let DATA = null, GLOBAL_NAMES = null;
+const GRAPHS = new Map();  // report_id -> 已读取的图
+window.LOGIC_INDEX = d => { DATA = d; };
+window.LOGIC_GRAPH = rec => { GRAPHS.set(rec.report_id, rec); };
+window.LOGIC_GLOBAL_NAMES = rows => { GLOBAL_NAMES = rows; };
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.onload = () => { el.remove(); resolve(); };
+    el.onerror = () => { el.remove(); reject(new Error('读取失败：' + src)); };
+    document.head.appendChild(el);
+  });
+}
+</script>
+<script src="data/graphs/index.js"></script>
+<script>
+const ROOT = DATA ? DATA.root : '';
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
-let current = null, network = null;
-
-// 某类边没有出现时，隐藏对应图例
-const ORIGINS = new Set(DATA.reports.flatMap(r => [r, ...(r.stages || [])].flatMap(g => g.edges.map(e => e.origin))));
-document.querySelectorAll('[data-origin]').forEach(el => { if (!ORIGINS.has(el.dataset.origin)) el.style.display = 'none'; });
+let current = null, entry = null, network = null;  // current：当前研报的图；entry：它在目录里的条目
 const ORIGIN_SHORT = {bridged: '跨段原文', part_of: '包含关系', logic: '逻辑补全', preset: '会计关系'};
 const ORIGIN_LONG = {extracted: '段内原文抽取', bridged: '跨段原文（悬挂补全或子图补全找到，原文引用已核对）',
   part_of: '包含关系（第 1 步整理：加总、相乘或细分；第 4 步缩减时下位概念并入最上层的概念）',
   logic: '逻辑补全（大模型按定义和语境选择，没有原文）', preset: '预置的会计关系'};
-const LAYERS = DATA.layers || {};
+const LAYERS = DATA ? DATA.layers : {};
 // 阶段：0-2 为包含关系缩减之前的阶段图（r.stages），3 为最终图（r 本身）
 const STAGES = ['① 概念分层', '② 原文连边', '③ 补全', '④ 包含关系缩减（最终）'];
 let stage = 3;
@@ -175,26 +189,51 @@ function stageLine(r) {
     '再剪掉有更长链路的直连、删掉没有概念连入的会计科目';
 }
 
-const reports = DATA.reports.slice().sort((a, b) => (a.company || '').localeCompare(b.company || '', 'zh') || (b.date || '').localeCompare(a.date || ''));
+// 没有公司名的（行业、策略报告等）排在最后
+const reports = (DATA ? DATA.reports : []).slice().sort((a, b) => !a.company - !b.company ||
+  (a.company || '').localeCompare(b.company || '', 'zh') || (b.date || '').localeCompare(a.date || ''));
+reports.forEach(r => { r.hay = [r.company, r.stock_code, r.broker, r.title, r.date, r.report_id].join(' ').toLowerCase(); });
+const titleOf = r => r.title || r.report_id;
 
 function renderList() {
-  const q = document.getElementById('q').value.trim().toLowerCase();
+  const words = document.getElementById('q').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const hits = reports.filter(r => words.every(w => r.hay.includes(w)));
   const box = document.getElementById('list');
   box.innerHTML = '';
   let company = null;
-  for (const r of reports) {
-    const hay = [r.company, r.broker, r.title, r.date, ...r.nodes.flatMap(n => [n.id, n.label])].join(' ').toLowerCase();
-    if (q && !hay.includes(q)) continue;
+  for (const r of hits.slice(0, MAX_LIST)) {
     if (r.company !== company) {
       company = r.company;
-      box.insertAdjacentHTML('beforeend', `<div class="company">${esc(company || '未知公司')}</div>`);
+      box.insertAdjacentHTML('beforeend', `<div class="company">${esc(company || '未注明公司')}${r.stock_code ? ' ' + esc(r.stock_code) : ''}</div>`);
     }
     const el = document.createElement('div');
-    el.className = 'rep' + (current === r ? ' on' : '');
-    el.innerHTML = `${esc(r.broker)} ${esc(r.date)}<small>${esc(r.title)}</small>`;
-    el.onclick = () => { current = r; renderList(); draw(); };
+    el.className = 'rep' + (entry === r ? ' on' : '');
+    el.innerHTML = `${esc(r.broker || '未注明券商')} ${esc(r.date)}<small>${esc(titleOf(r))}</small>`;
+    el.onclick = () => select(r);
     box.appendChild(el);
   }
+  box.insertAdjacentHTML('beforeend', `<div class="more">${hits.length > MAX_LIST
+    ? `符合条件的有 ${hits.length} 篇，只列出前 ${MAX_LIST} 篇，请输入关键词缩小范围` : `共 ${hits.length} 篇`}</div>`);
+}
+
+// 选中一篇研报：这时才读取它的数据文件，读到后计算布局并绘图
+async function select(r) {
+  entry = r;
+  renderList();
+  history.replaceState(null, '', '#' + encodeURIComponent(r.report_id));
+  if (!GRAPHS.has(r.report_id)) {
+    document.getElementById('meta').innerHTML = `<div class="s">正在读取 ${esc(r.company)} ${esc(r.broker)} ${esc(r.date)} 的逻辑图…</div>`;
+    try {
+      await loadScript(GRAPH_DIR + r.file);
+    } catch (err) {
+      if (entry === r) document.getElementById('meta').innerHTML = `<div class="s">${esc(err.message)}（数据文件不存在或已被移动）</div>`;
+      return;
+    }
+    while (GRAPHS.size > MAX_CACHE) GRAPHS.delete(GRAPHS.keys().next().value);
+  }
+  if (entry !== r) return;  // 读取期间又选了别的研报
+  current = GRAPHS.get(r.report_id);
+  draw();
 }
 
 function nodeColor(n) {
@@ -207,9 +246,12 @@ function draw() {
   const r = current;
   if (!r) return;
   const s = r.stats;
+  // 某类边在这篇研报里没有出现时，隐藏对应图例
+  const origins = new Set([r, ...(r.stages || [])].flatMap(g => g.edges.map(e => e.origin)));
+  document.querySelectorAll('[data-origin]').forEach(el => { el.style.display = origins.has(el.dataset.origin) ? '' : 'none'; });
   const byLayer = [3, 4, 5].map(k => `${s.n_by_layer[k] || 0}`).join('/');
   document.getElementById('meta').innerHTML =
-    `<div class="t">${esc(r.company)}｜${esc(r.broker)} ${esc(r.date)}｜${esc(r.title)}</div>` +
+    `<div class="t">${esc(r.company || '未注明公司')}｜${esc(r.broker)} ${esc(r.date)}｜${esc(titleOf(r))}</div>` +
     `<div class="s"><b>${STAGES[stage]}</b>　${esc(stageLine(r))}</div>` + (stage < 3 ? '' :
     `<div class="s">${r.n_paragraphs} 段 · 概念 ${s.n_concepts} 个（第 3/4/5 层 ${byLayer}）· ${s.n_relations} 条原文关系` +
     (s.n_reverse ? `（反向 ${s.n_reverse} 条未进图）` : '') + (s.n_parallel ? ` · 并列复核删掉 ${s.n_parallel} 条` : '') +
@@ -453,10 +495,15 @@ function showEdge(e) {
     (ctx.length ? `<div class="sec">${e.origin === 'logic' ? '理由' : '说明'}</div><ul>${ctx.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '');
 }
 
-function renderTable() {
-  const rows = DATA.global_names || [];
-  document.getElementById('table').innerHTML = rows.length
-    ? `<table><thead><tr><th>全局名称</th><th>层</th><th>研报数</th><th>各研报中的名称（研报数）</th><th>定义</th></tr></thead><tbody>` +
+async function renderTable() {
+  const box = document.getElementById('table');
+  if (!GLOBAL_NAMES) {
+    box.innerHTML = '<p class="ev">正在读取全局名称表…</p>';
+    try { await loadScript(GRAPH_DIR + 'global_names.js'); } catch (err) { box.innerHTML = `<p class="ev">${esc(err.message)}</p>`; return; }
+  }
+  const all = GLOBAL_NAMES || [], rows = all.slice(0, MAX_ROWS);
+  box.innerHTML = rows.length
+    ? (all.length > MAX_ROWS ? `<p class="ev">共 ${all.length} 组，只显示前 ${MAX_ROWS} 组；完整的表见 data/nodes.parquet。</p>` : '') + `<table><thead><tr><th>全局名称</th><th>层</th><th>研报数</th><th>各研报中的名称（研报数）</th><th>定义</th></tr></thead><tbody>` +
       rows.map(x => `<tr><td>${esc(x.global)}</td><td>${x.layer ?? ''}</td><td>${x.n_reports}</td>` +
         `<td>${x.members.map(m => `${esc(m.name)}（${m.n_reports}）`).join('、')}</td>` +
         `<td>${x.members.map(m => `<div class="ev">${esc(m.name)}：${esc(m.definition || '—')}</div>`).join('')}</td></tr>`).join('') +
@@ -481,20 +528,19 @@ document.getElementById('show-logic').onchange = draw;
 document.getElementById('tab-graph').onclick = () => tab('graph');
 document.getElementById('tab-table').onclick = () => tab('table');
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
-current = reports[0] || null;
-renderStages();
-renderList();
-if (typeof vis === 'undefined') document.getElementById('net').innerHTML = '<p style="padding:16px">vis-network 加载失败，请检查网络连接。</p>';
-else draw();
+if (!DATA) {
+  document.getElementById('net').innerHTML = '<p class="msg">没有找到 data/graphs/index.js：请先运行 python extract_logic_chain.py 生成逻辑图数据，' +
+    '并保持本页面和 data 文件夹在同一个目录下。</p>';
+} else if (typeof vis === 'undefined') {
+  document.getElementById('net').innerHTML = '<p class="msg">vis-network 加载失败，请检查网络连接。</p>';
+} else {
+  document.getElementById('count').textContent = `共 ${reports.length} 篇研报 · 模型 ${DATA.model} · 生成于 ${DATA.generated}`;
+  renderStages();
+  renderList();
+  const wanted = decodeURIComponent(location.hash.slice(1));
+  const first = reports.find(r => r.report_id === wanted) || reports[0];
+  if (first) select(first);
+}
 </script>
 </body>
 </html>
-'''
-
-
-def main(graphs_path, out_html):
-    data = json.loads(Path(graphs_path).read_text(encoding='utf-8'))
-    payload = json.dumps(data, ensure_ascii=False).replace('</', '<\\/')  # 防止数据中的 </script> 提前结束脚本
-    html = TEMPLATE.replace('__VIS_URL__', VIS_URL).replace('__DATA__', payload)
-    Path(out_html).write_text(html, encoding='utf-8')
-    print(f'已写入 {out_html}（{len(data["reports"])} 篇研报）')

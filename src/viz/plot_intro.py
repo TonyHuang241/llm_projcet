@@ -1,13 +1,13 @@
 """生成介绍页：研报逻辑图的抽取流程、结果可信度，以及基于逻辑图的分歧度量（单个自包含 HTML，不依赖外部库）。
 
 页面上的数字都从结果文件算出：
-  report_graphs.json（report_logic 的输出）：图、边的引文、未进链概念、被删掉的关系、各篇统计；
+  输出目录的 data/graphs/（report_logic 的输出）：图、边的引文、未进链概念、被删掉的关系、各篇统计；
   report_paragraphs.parquet：研报原文段落，用来和边的引文对照；
-  themes.parquet（report_compare 的输出）：每家公司的概念 → 主题。
+  data/compare/themes.parquet（report_compare 的输出）：每家公司的概念 → 主题。
 分歧度量：每个概念 1 单位流量沿出边平分流向公司估值，按（起点主题 → 终点主题或科目类别）汇总成分布；会计科目归为
 “现金流”和“估值倍数”两类。两篇的 JS 散度 = 主题项 + 关系项，结构强度 = 关系项 / 共同主题分量。
 
-用法：在 main.py 中设置 TASK = 'intro_page'
+用法：python extract_logic_chain.py --task intro_page（样例研报写死在下面，对应 data/report_paragraphs.parquet 那 16 篇）
 """
 import itertools
 import json
@@ -20,7 +20,9 @@ from pathlib import Path
 import networkx as nx
 import pyarrow.parquet as pq
 
+from src.config import OutDir
 from src.fin_items import MULTIPLE, ROOT
+from src.logic.output import read_graphs
 
 SAMPLE_COMPANY = '海康威视'
 SAMPLE_A = '20261018_国金证券_002415.SZ'  # 原文与图逐条对照：全部边都有引文，没有逻辑补全边
@@ -185,10 +187,14 @@ def sample_b_extra(rec):
 
 # ==================== 主流程 ====================
 
-def main(graphs_path, paras_path, themes_path, out_html):
-    data = json.loads(Path(graphs_path).read_text(encoding='utf-8'))
+def main(out_dir, paras_path, out_html):
+    """out_dir：report_logic 和 report_compare 的输出目录；paras_path：抽取时用的段落 parquet。"""
+    data = read_graphs(out_dir)
     recs = {r['report_id']: r for r in data['reports']}
-    theme_rows = pq.read_table(themes_path).to_pylist()
+    missing = sorted(({SAMPLE_A, SAMPLE_B} | {r for a, b, *_ in PAIRS for r in (a, b)}) - set(recs))
+    if missing:
+        raise SystemExit(f'介绍页的样例研报不在 {out_dir} 的逻辑图里：{missing}（样例写死在 plot_intro.py 开头，换了研报范围要相应修改）')
+    theme_rows = pq.read_table(OutDir(out_dir).compare / 'themes.parquet').to_pylist()
     of = defaultdict(dict)
     for t in theme_rows:
         of[t['stock_code']][t['concept']] = t['theme']

@@ -1,87 +1,139 @@
-"""研报 PDF 正文抽取：只保留正文段落，图表、表格、侧栏、页眉页脚、下载水印、风险提示和末尾的免责声明全部剔除，结果写成 parquet。
+"""研报纯文本正文抽取：只保留正文段落，图表、表格、侧栏、页眉页脚、水印、风险提示和末尾的免责声明全部剔除，结果写成 parquet。
 
-这是推理链抽取（src/report_logic.py）的第一步，可以单独替换：已有处理好的文本时，只要自己写出同样结构的 parquet，
+输入是已经从 PDF 抽成纯文本的研报（data/HS300_reports_2024/MM/DD/<GUID>.txt，UTF-8 为主，读不了时依次试 GB18030），
+文件名是 GUID，正文和表格、图表刻度、侧栏、页眉页脚、免责声明混在一起，一段话常被拆成多行，几个表格单元格也常挤在一行。
+
+这是逻辑链抽取（src/report_logic.py）之前的文本清理，单独运行，也可以单独替换：已有处理好的文本时，只要自己写出同样结构的 parquet，
 直接从第二步开始即可。parquet 每行一个段落，必需的列：
-    report_id  研报唯一标识（字符串）
+    report_id  研报唯一标识（字符串，这里是文件名里的 GUID）
     para_id    段落在研报内的序号（整数，从 1 开始）
     text       段落文字
 可选列（缺失时留空，只用于给大模型提供上下文和在 HTML 中展示）：
-    file、date、broker、company、stock_code、title、page、section（段落所属的小标题）
+    file（相对输入目录的路径）、date（目录的年/月/日，YYYYMMDD）、broker（“资料来源”行里出现最多的券商）、
+    company、stock_code（文件开头唯一出现的“公司名（代码）”；行业报告等出现多个代码时留空）、
+    title（纯文本里没有可靠的标题位置，留空）、page（纯文本没有页码，留空）、section（段落所属的小标题）
 
-各家券商版式不同（字号、侧栏位置、表格样式都不一样），这里不写死页码和坐标，而是按行判断：
-  1. 末尾声明：从“免责声明”“分析师声明”“评级说明”等小标题（出现在后半篇）开始，之后全部丢弃；
-  2. 正文字号：取“像正文”的行（含中文标点、汉字占比高）按字数加权的主要字号，图表内文字、表格、侧栏通常字号更小；
-  3. 逐行剔除：页边距内的行、多页重复出现的页眉页脚、图表标题和资料来源、下载水印、分析师联系方式、竖排文字；
-  4. 拼段：上一行没有以句号等结尾就接着拼；以句号结尾且下一行缩进、换项目符号、上一行没写满或行距变大时另起一段；
-     小标题单独识别，作为后续段落的 section；
-  5. 段落后处理：剔除风险提示（风险小节整节丢弃，段尾的“风险提示：…”截掉），丢掉汉字占比过低的段落（表格残留），
+纯文本没有字号和坐标，这里只看文字本身，按行（行内再按项目符号和连续空格切开）判断：
+  1. 预处理：去掉模板标记（[Table_Title]、＃summary＃ 等）和行内的“请务必阅读…声明”类水印；
+     抽成“?”的项目符号和行首的 ●▌ 等符号处切开并强制分段；连续 3 个以上空格、句末标点后的 2 个以上空格处切开；
+  2. 末尾声明：从“免责声明”“分析师声明”“评级说明”等小标题（出现在全文字数的 40% 之后）开始，之后全部丢弃；
+  3. 逐行剔除：在全篇中重复出现 3 次以上的短行（页眉页脚）、页码、图表标题和资料来源、目录、相关研究、
+     分析师联系方式；没有汉字的行（坐标轴刻度、图例数字）；数字和数字串占比高、没有句读的行（表格）；
+  4. 拼段：没有句读的短行是侧栏、图例或小标题，后面紧跟正文的记为小标题（作为后续段落的 section），其余只作分段点；
+     上一行没有以句号等结尾就接着拼，项目符号处另起一段；只有一行、没写满一行（按本篇折行的行宽估计）且不以句号等结尾的
+     短段是小标题；后面跟着日期的行是相关研究的条目，丢弃；
+  5. 段落后处理：剔除风险提示（风险小节整节丢弃，段尾的“风险提示：…”截掉），丢掉声明套话、分析师简介、
+     汉字占比或句读过少的段落（表格残留）、没有句末标点的短段（标题、侧栏残留）和重复段落（首页摘要与正文重复），
      过短的段落并入同一小节的相邻段落，过长的按句子切开。
 
-用法：在 main.py 中设置 TASK = 'report_text'
+运行：在仓库根目录执行 python clear_txt.py（输入、输出路径和试跑篇数在 clear_txt.py 开头设置，也可以用 --limit N 试跑）。
 """
+import random
 import re
-import statistics
-from collections import Counter, defaultdict
+import sys
+import time
+from collections import Counter
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-FILE_RE = re.compile(r'^(?P<date>\d{8})-(?P<broker>[^-]+)-(?P<company>[^（(]+)[（(](?P<code>[0-9A-Za-z.]+)[）)].*?[：:](?P<title>.+)$')
-CJK_RE = re.compile(r'[\u4e00-\u9fff]')
+CJK_RE = re.compile(r'[一-鿿]')
 SENT_END = '。！？；…'
 SENT_RE = re.compile(rf'[^{SENT_END}]+(?:[{SENT_END}]+[”’）)]*|$)')
 PROSE_PUNCT = '，。；、：'
+BODY_PUNCT = '，。；、！？…'  # 有这些标点才算成句；冒号不算（侧栏字段“当前价格：”“投资评级：”也带冒号）
 
-# 末尾声明部分的小标题（允许前面带编号和券商名）；只在后半篇生效，避免误伤首页“投资评级”一类的字段。
+# 末尾声明部分的小标题（允许前面带编号和券商名）；只在全文字数的后 60% 生效，避免误伤首页“投资评级”一类的字段。
 # 每页页脚的“请务必阅读…免责声明”“敬请参阅最后一页特别声明”之类的提示不算
 DISCLAIMER_HEAD_RE = re.compile(
-    r'^[\s\d一二三四五六七八九十、.．]*(.{0,8}(免责|分析师声明|分析师承诺|法律声明|特别声明|一般声明|重要声明|版权声明|'
-    r'信息披露|分析师(介绍|简介)|研究团队简介|证券投资咨询业务)|.{0,8}评级的?(说明|标准|体系|定义|比率))')
+    r'^[\s\d一二三四五六七八九十、.．【\[]*(.{0,8}(免责|分析师声明|分析师承诺|法律声明|特别声明|一般声明|重要声明|郑重声明|版权声明|'
+    r'信息披露|分析师(介绍|简介)|研究团队简介|证券投资咨询业务)|.{0,8}评[级等]的?(说明|标准|体系|定义|比率))')
 DISCLAIMER_HINT_RE = re.compile(r'请|敬请|阅读|参阅|关注|详见|见文末|见末页')
 DISCLAIMER_HEAD_MAX_LEN = 16  # 评级体系类标题后面常跟括号说明，放宽到 40 字
-# 逐行剔除：水印、免责提示、分析师联系方式、图表标题和资料来源
-DROP_LINE_RE = re.compile(
-    r'请务必阅读|请仔细阅读|敬请参阅|免责声明|法律声明|仅供内部使用|请勿传阅|金融终端下载|版权所有|证券研究报告|'
-    r'\.{5,}|…{3,}|·{5,}|^\s*(图表)?目\s*录\s*$|'  # 目录页的引导点
-    r'^\s*(\d+[.、]\s*)?《|》\s*$|》[，,]?\s*\d{4}[.\-/年]\d{1,2}|^\s*相关(研究|报告)|^\s*附(录|表)|'
-    r'^.{0,12}(分析员|分析师|研究员|联系人|研究助理)|——.{0,6}(简评|点评|深度|报告)|'
-    r'^.{0,20}(市价|收盘价|总市值|流通市值|总股本|流通股本|每股净资产|市净率|资产负债率|一年最低|52\s*周|最新收盘)|'
-    r'执业证书|执业编号|S\d{13}|[\w.\-]+[@＠][\w\-]+\.[\w.]+|电话[:：]|邮箱[:：]|\d{3,4}-\d{7,8}|'
-    r'^\s*(图|表|图表|附图|附表|Figure|Exhibit|Table)\s*([\d一二三四五六七八九十]+|$)|'
-    r'^\s*(资料来源|数据来源|来源|注|备注|Source)\s*[:：]', re.I)
-# 段首的项目符号或编号：上一段已结束时据此另起一段
+DISCLAIMER_FROM = 0.4  # 声明小标题只在全文字数的这个比例之后查找
+# 声明、评级定义、联系地址、分析师简介一类的套话：段落里出现就整段丢弃（声明小标题被截掉、只剩残段时靠这条兜底）
+DISCLAIMER_TEXT_RE = re.compile(
+    r'证券市场是一个风险无时不在|本(研究)?报告(仅|由|的|中的|所|版权|不构成|是基于|基于|旨在)|本公司(不会|及其|具有|保留|对本报告|已获|不对|不保证)|'
+    r'投资者(应当?|不应|务必|自主|据此|需自行|应自行)|报告发布(之|当)?日(起|后)|以报告发布日|版权(所有|归)|未经.{0,15}(许可|授权|同意)|'
+    r'本(申明|声明)|最终解释权|等地设有分支机构|分支机构正在建设|'
+    r'邮政编码|邮编[:：]|地址[:：]|网址[:：]|传真[:：]|证券投资咨询|经营证券期货业务|执业资格|评级(说明|标准|体系|定义)|'
+    r'(加入|就职于|任职于).{0,12}(证券|研究所|研究院|研究中心|研究部)|\d+年.{0,8}(证券|卖方|行业)?研究经验|'
+    r'(买入|增持|中性|减持|卖出|推荐|回避|看好|看淡|持有|强于大市|弱于大市|同步大市|优于大市|跑赢行业|跑输行业)'
+    r'[^，。；]{0,16}[：:（(].{0,20}(相对|超越|强于|弱于|高于|低于|介于|涨幅|跌幅|之间|以上|以下)')
+
+# 模板标记和行内水印：先从行里删掉再判断
+TEMPLATE_RE = re.compile(r'\[Table_\w*\]|＃[A-Za-z0-9_]+＃|glzqdatemark\d*')
+WATERMARK_RE = re.compile(
+    r'(请务必|请仔细|敬请|请)(阅读|参阅|参考|查阅|关注)[^。！？\n]{0,40}?(声明|说明|条款|披露|内容)(部分|及其项下所有内容)?[。.]?|'
+    r'请通过合法途径获取[^。\n]*?(。|$)(如经由[^。\n]*?(。|$))?|[\s　]*[1-9]\d{0,2}\s*/\s*[1-9]\d{0,2}\s*$')
+# 抽成“?”的项目符号（左边是行首、空白、汉字或标点，右边是汉字、括号、数字）、私用区的符号字体字符；
+# 左边是行首、空白或句末标点时右边也可以是字母（“。?Q3自产煤…”），汉字中间的“?X Elite”多半是 ® 等符号，不切
+BULLET_Q_RE = re.compile(r'(?:^|(?<=[\s。；！]))[?-]+\s*(?=[A-Za-z一-鿿（(【“\d])|'
+                         r'(?<=[一-鿿，：、）)”])[?-]+\s*(?=[一-鿿（(【“\d])')
+LEAD_BULLET_RE = re.compile(r'^\s*(?:[•■-◿▀-▟☀-➿√✓※]+|[lnuqv](?=\s+[一-鿿]))\s*')
+SPLIT_RE = re.compile(r'\s{3,}|(?<=[。！？；])\s{2,}|(?<=[。！？；])\s*(?=(?:图表?|表|资料来源|数据来源)\s*\d{0,2}\s*[：:])')
+
+# 逐行剔除（任意长度）：图表标题、资料来源、目录引导点、相关研究、联系方式
+CAPTION_RE = re.compile(
+    r'^\s*(图|表|图表|附图|附表|Figure|Exhibit|Table|Chart)\s*([\d一二三四五六七八九十]+|$)|'
+    r'^\s*(资料来源|数据来源|来源|注|备注|Source|Sources)\s*[:：]|\.{5,}|…{3,}|·{5,}|^\s*(图表|插图|表格|图|表)?目\s*录\s*$', re.I)
+SHORT_CAPTION_RE = re.compile(r'(资料|数据)来源[:：]')  # 短行中间出现的资料来源（“历史表现 数据来源：wind…”）
+META_RE = re.compile(
+    r'^\s*(\d+[.、]\s*)?《|》\s*$|》[，,]?\s*[—\-]*\s*\d{4}[.\-/年]\d{1,2}|^\s*相关(研究|报告)|^\s*附(录|表)|'
+    r'执业证书|执业编号|登记编号|执证编号|SAC\s*(执业|执证|编号|No)|S\d{13}|[\w.\-]+[@＠][\w\-]+\.[\w.]+|电话[:：]|邮箱[:：]|\d{3,4}-\d{7,8}', re.I)
+# 只对短行生效（长行里出现这些词多半是正文）：页脚提示、分析师署名、副标题、侧栏字段
+SHORT_DROP_RE = re.compile(
+    r'请务必阅读|请仔细阅读|敬请参阅|免责声明|法律声明|仅供内部使用|请勿传阅|金融终端下载|版权所有|证券研究报告|扫码|二维码|'
+    r'^.{0,12}(分析员|分析师|研究员|联系人|研究助理)|——.{0,6}(简评|点评|深度|报告)')
+# 侧栏字段名：只对没有句读的短行生效（“…按照8月26日收盘价12.43元，对应PE…”是正文）
+SIDEBAR_FIELD_RE = re.compile(r'^.{0,20}(市价|收盘价|总市值|流通市值|总股本|流通股本|每股净资产|市净率|资产负债率|一年最低|52\s*周|最新收盘)')
+SHORT_DROP_MAX = 60
+PAGE_NO_RE = re.compile(r'[-—第]*\d{1,3}[-—页]*|\d{1,3}/\d{1,3}|Page\d+', re.I)
+DATE_ONLY_RE = re.compile(r'[-—]*\d{4}[-./年]\d{1,2}([-./月]\d{1,2}日?)?')
+DATE_TAIL_RE = re.compile(r'[-—–]\s*\d{4}[-./]\d{1,2}([-./]\d{1,2})?\s*$')  # “…：标题-2024/02/25”式的相关研究条目
+NUM_TOKEN_RE = re.compile(r'[-+−–(（]*\d[\d,.]*(%|[AEFaef]|[QH]\d?|x|X|倍|pct|pp|bp|bps)?[)）%]*|--?|—|N/?A|NM|nan', re.I)
+# 段首的项目符号或编号：上一段已结束时据此另起一段；前面只有一行短句时，短句是这一组条目的小标题
 BULLET_RE = re.compile(
-    r'^\s*([\u2022\u25a0-\u25ff\u2600-\u27bf\uf020-\uf0ff√✓]|[\-–—*]\s|[(（]?\d{1,2}[)）]|\d{1,2}[、.．](?!\d)|[(（][一二三四五六七八九十]+[)）]|'
+    r'^\s*([•■-◿☀-➿-√✓①-⑳]|[\-–—*]\s|[(（]?\d{1,2}[)）]|\d{1,2}[、.．](?!\d)|[(（][一二三四五六七八九十]+[)）]|'
     r'[一二三四五六七八九十]+、|第[一二三四五六七八九十]+[，,、])')
-RATING_RE = re.compile(r'买入|增持|推荐|中性|减持|跑赢|优于大市|评级|^——')  # 首页的评级、副标题不作小标题
+RATING_RE = re.compile(r'买入|增持|推荐|中性|减持|跑赢|优于大市|评级|评等|^——')  # 首页的评级、副标题不作小标题
+# 侧栏、图表的栏目名：即使后面紧跟正文也不作小标题
+SIDEBAR_LABEL_RE = re.compile(r'市场走势|股价表现|股价走势|历史表现|市场表现|行情走势|走势图|股价相对|基本数据|主要数据|公司信息|公司数据|'
+                              r'基础数据|股票数据|市场数据|交易数据|最高/最低|作者|分析师|研究员|联系人|沪深300|上证指数|深证成指|创业板指|收益率')
 # 风险提示是按惯例罗列的风险清单，不属于推理链，整节剔除。小节标题（含首页侧栏的“风险”栏目名）整行是这些词时算风险小节，
 # “关注贸易政策调整风险”这类正文小节不受影响
-RISK_HEAD_RE = re.compile(r'^\W*([一二三四五六七八九十\d]+[、.．]\s*)?(主要|投资)?风险(提示|因素|分析|因素提示)?\W*$')
-# 段首或句末之后出现的“风险提示”（前面可带项目符号）：从这里截到段尾
-RISK_TEXT_RE = re.compile(r'(?:^|(?<=[。！？；]))\W{0,3}风险(提示|因素)')
-HEADING_NUM_RE = re.compile(r'^\s*([一二三四五六七八九十]+、|\d{1,2}(\.\d{1,2})*[、.．\s](?!\d)|[(（][一二三四五六七八九十\d]+[)）])')
+RISK_HEAD_RE = re.compile(r'^\W*([一二三四五六七八九十\d]+(\.\d+)*[、.．\s]\s*)?(主要|投资)?风险(提示|因素|分析|因素提示)?\W*$')
+# 段首或句末之后出现的“风险提示”（前面可带项目符号），以及任何位置的“风险提示：”（侧栏插进来的半句后面常直接接风险提示）：
+# 从这里截到段尾
+RISK_TEXT_RE = re.compile(r'(?:^|(?<=[。！？；]))\W{0,3}风险(提示|因素)|风险提示[:：]')
 
-MARGIN_TOP, MARGIN_BOTTOM = 0.045, 0.955  # 页面高度的比例，之外是页眉页脚
-REPEAT_PAGE_SHARE = 0.5  # 去掉数字后在这么多比例（且至少 2 页）的页面上重复出现的行视为页眉页脚
-BODY_SIZE_SHARE = 0.15  # 某字号的正文样式字数占最多那个字号的比例达到该值，才算正文字号
-SIZE_TOL = 0.35  # 与正文字号相差在此之内的行算正文
-MIN_SIZE = 8.0  # 小于该字号的一律不算正文（图内文字、表格）
+# 公司名（代码）：只认 A 股代码；侧栏、标题里常见“贵州茅台(600519.SH)”“锦江酒店（600754）”
+CODE_RE = re.compile(r'([一-鿿A-Za-z]{2,12})\s*[（(]\s*((?:00|30|60|68)\d{4})(?:\s*[.．]\s*(SH|SZ|sh|sz))?\s*[）)]')
+META_HEAD_LINES = 40  # 公司名和代码只在开头这么多行里找
+# 券商：在“资料来源”一类的行里计数，出现最多且没有并列的算本篇券商
+BROKERS = {
+    '中金公司': ('中金公司', '中国国际金融'), '中信证券': ('中信证券',), '中信建投': ('中信建投',), '华泰证券': ('华泰证券', '华泰研究'),
+    '国泰君安': ('国泰君安',), '海通证券': ('海通证券',), '申万宏源': ('申万宏源', '申银万国'), '中国银河': ('中国银河', '银河证券'),
+    '东方财富证券': ('东方财富证券',), '群益证券': ('群益证券',), '华兴证券': ('华兴证券',), '第一上海': ('第一上海',),
+}
+SOURCE_LINE_RE = re.compile(r'来源|预测|整理|Source', re.I)
+BROKER_RE = re.compile(r'(?:^|(?<=[：:，,、\s;；(（]))([一-鿿]{2,6}?证券)(?=研究|研发|整理|预测|经济|发展|产业|股份|$|[，,；;。\s)）])')
+
 HEADING_MAX_LEN = 30
 MIN_PARA_CHARS, MAX_PARA_CHARS = 60, 1500
 MIN_CJK_SHARE = 0.3  # 汉字占比低于该值的段落视为表格残留
 MIN_PUNCT_DENSITY = 1.5  # 每 100 字的句读数低于该值的段落视为表格、图例残留
-BOLD_COMMON_SHARE = 0.3  # 某正文字号中粗体字数超过该比例时，粗体不再算小标题的依据
+REPEAT_MIN = 3  # 全篇重复出现这么多次的短行视为页眉页脚
+MIN_REPORT_CJK = 200  # 汉字少于该数的文件视为空文件（扫描件、乱码、只有一串字符）或外文研报，不抽取
 
-
-def parse_filename(stem):
-    """从文件名“日期-券商-公司（代码）…：标题”中取出元数据，格式不符时只保留标题。"""
-    m = FILE_RE.match(stem)
-    if not m:
-        return {'date': '', 'broker': '', 'company': '', 'stock_code': '', 'title': stem}
-    d = m.groupdict()
-    return {'date': d['date'], 'broker': d['broker'].strip(), 'company': d['company'].strip(),
-            'stock_code': d['code'].upper(), 'title': d['title'].strip()}
+SCHEMA = pa.schema([('report_id', pa.string()), ('para_id', pa.int64()), ('file', pa.string()), ('date', pa.string()),
+                    ('broker', pa.string()), ('company', pa.string()), ('stock_code', pa.string()), ('title', pa.string()),
+                    ('page', pa.int64()), ('section', pa.string()), ('text', pa.string())])
+# 汇总里各类剔除内容的名称（字数都按去掉空白后计）
+DROP_NAMES = {'disclaimer': '免责声明', 'risk': '风险提示', 'table': '表格', 'chart': '图表数字/无汉字行',
+              'caption': '图表标题/资料来源/目录', 'header': '页眉页脚/水印/联系方式/相关研究', 'sidebar': '侧栏/图例/短行',
+              'heading': '小标题（记入 section）', 'residue': '段落过滤（表格残留/短标题/重复段）', 'template': '模板标记'}
 
 
 def cjk_share(text):
@@ -89,44 +141,14 @@ def cjk_share(text):
     return len(CJK_RE.findall(t)) / len(t) if t else 0.0
 
 
-def page_lines(page, page_no):
-    """页面上所有横排文字行，带坐标、主要字号（按字数加权）、是否粗体和所在文字块编号。"""
-    lines = []
-    for b in page.get_text('dict')['blocks']:
-        if b['type'] != 0:
-            continue
-        for ln in b['lines']:
-            if abs(ln['dir'][1]) > 0.1:  # 竖排或旋转的文字：坐标轴标签、水印
-                continue
-            spans = [s for s in ln['spans'] if s['text'].strip()]
-            if not spans:
-                continue
-            sizes, bold = Counter(), 0
-            for s in spans:
-                n = len(s['text'].strip())
-                sizes[round(s['size'], 1)] += n
-                if s['flags'] & 16 or re.search(r'bold|heavy|black|hei|黑体', s['font'], re.I):
-                    bold += n
-            n_chars = sum(sizes.values())
-            text = ''.join(s['text'] for s in ln['spans']).strip()
-            x0, y0, x1, y1 = ln['bbox']
-            lines.append({'page': page_no, 'block': (page_no, b['number']), 'text': text,
-                          'x0': x0, 'y0': y0, 'x1': x1, 'y1': y1,
-                          'size': sizes.most_common(1)[0][0], 'bold': bold > n_chars / 2})
-    return merge_fragments(lines)
+def nchars(text):
+    """去掉空白后的字数，汇总统计都用它。"""
+    return len(re.sub(r'\s', '', text))
 
 
-def merge_fragments(lines):
-    """两端对齐时同一行有时被拆成左右几段（如“…费用率为”和“3.5%/2.3% ，同比”），按基线和间距拼回一行。"""
-    out = []
-    for ln in lines:
-        prev = out[-1] if out else None
-        if (prev and abs(ln['y0'] - prev['y0']) < (prev['y1'] - prev['y0']) * 0.3
-                and 0 <= ln['x0'] - prev['x1'] < ln['size'] * 2 and abs(ln['size'] - prev['size']) <= SIZE_TOL):
-            prev.update(text=prev['text'] + ln['text'], x1=ln['x1'], y1=max(prev['y1'], ln['y1']))
-        else:
-            out.append(ln)
-    return out
+def width(text):
+    """排版宽度：汉字和全角符号算 1，半角字符算 0.5（判断一行是否写满）。"""
+    return sum(1 if ord(c) > 0x2E7F else 0.5 for c in text if not c.isspace())
 
 
 def is_prose(text):
@@ -138,137 +160,185 @@ def punct_density(text):
     return sum(text.count(p) for p in PROSE_PUNCT + '！？') * 100 / max(len(text), 1)
 
 
-def find_disclaimer_start(pages):
-    """返回 (页序号, 行序号)：末尾声明部分的第一行；没有找到时返回 None。只在后半篇查找。"""
-    first = max(1, len(pages) // 2)
-    for pi in range(first, len(pages)):
-        for li, ln in enumerate(pages[pi]):
-            t = re.sub(r'\s', '', ln['text'])
-            m = DISCLAIMER_HEAD_RE.match(t)
-            if m and not DISCLAIMER_HINT_RE.search(t) and len(t) <= (40 if '评级' in m.group(0) else DISCLAIMER_HEAD_MAX_LEN):
-                return pi, li
+def ends_sentence(text):
+    return text.rstrip()[-1:] in SENT_END + '”’）)' and not text.rstrip().endswith(('（', '('))
+
+
+def read_text(path):
+    """读文件并解码：UTF-8（含 BOM）→ UTF-16（有 BOM 时）→ GB18030，都不行时按 UTF-8 替换坏字节。返回 (文本, 编码)。"""
+    raw = path.read_bytes()
+    if raw[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        return raw.decode('utf-16', errors='replace'), 'utf-16'
+    for enc in ('utf-8-sig', 'gb18030'):
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError:
+            pass
+    return raw.decode('utf-8', errors='replace'), 'utf-8(replace)'
+
+
+def split_segments(text, drop):
+    """全文 -> 片段列表 [{'text','hard'}]；hard 表示片段前有项目符号或空行，必须另起一段。删掉的模板标记、水印计入 drop。"""
+    segs, hard = [], False
+    for line in text.replace('\r', '\n').split('\n'):
+        line = line.replace('　', ' ').replace('\xa0', ' ').replace('\t', ' ')
+        clean = TEMPLATE_RE.sub(' ', line)
+        drop['template'] += nchars(line) - nchars(clean)
+        line = WATERMARK_RE.sub(' ', clean)
+        drop['header'] += nchars(clean) - nchars(line)
+        if not line.strip():
+            hard = True
+            continue
+        m = LEAD_BULLET_RE.match(line)
+        if m and m.end() < len(line):
+            line, hard = line[m.end():], True
+        for part in SPLIT_RE.split(line):
+            pieces = BULLET_Q_RE.split(part)
+            for i, p in enumerate(pieces):
+                p = p.strip()
+                if p:
+                    segs.append({'text': p, 'hard': hard or i > 0})
+                    hard = False
+                elif i > 0:
+                    hard = True
+    return segs
+
+
+def find_disclaimer_start(segs):
+    """返回末尾声明部分第一个片段的序号；没有找到时返回 None。只在全文字数的 DISCLAIMER_FROM 之后查找。"""
+    total = sum(len(s['text']) for s in segs)
+    seen = 0
+    for i, s in enumerate(segs):
+        seen += len(s['text'])
+        if seen < total * DISCLAIMER_FROM:
+            continue
+        t = re.sub(r'\s', '', s['text'])
+        m = DISCLAIMER_HEAD_RE.match(t)
+        if m and not DISCLAIMER_HINT_RE.search(t) and len(t) <= (40 if '评' in m.group(0) else DISCLAIMER_HEAD_MAX_LEN):
+            return i
     return None
 
 
-def strip_repeated(pages):
-    """去掉多页重复出现的行（页眉、页脚、页码），按去掉数字和空白后的文字比较。"""
-    if len(pages) < 2:
-        return pages
+def strip_repeated(segs):
+    """标出全篇重复出现 REPEAT_MIN 次以上的短行（页眉、页脚、页码），按去掉数字和空白后的文字比较。"""
     key = lambda t: re.sub(r'[\d\s/]', '', t)
-    seen = Counter(k for lines in pages for k in {key(ln['text']) for ln in lines})
-    limit = max(2, len(pages) * REPEAT_PAGE_SHARE)
-    return [[ln for ln in lines if seen[key(ln['text'])] < limit] for lines in pages]
+    cand = [s for s in segs if s['kind'] in ('body', 'label') and width(s['text']) <= SHORT_DROP_MAX]  # 表格行本来就会剔除
+    seen = Counter(key(s['text']) for s in cand)
+    for s in cand:
+        k = key(s['text'])
+        if len(CJK_RE.findall(k)) >= 2 and seen[k] >= REPEAT_MIN:
+            s['kind'] = 'header'
+    return segs
 
 
-def body_style(lines):
-    """正文字号，以及其中粗体很常见的字号（这些字号上粗体不能作为小标题的依据，如中金正文整体用黑体）。
-    正文样式的行按字数加权，字数达到最多者 BODY_SIZE_SHARE 的字号都算（同一篇首页和正文页字号可能不同）。"""
-    w, w_bold = Counter(), Counter()
-    for ln in lines:
-        if ln['size'] >= MIN_SIZE and is_prose(ln['text']):
-            w[ln['size']] += len(ln['text'])
-            w_bold[ln['size']] += len(ln['text']) * ln['bold']
-    if not w:
-        return [], set()
-    top = max(w.values())
-    sizes = sorted(s for s, n in w.items() if n >= top * BODY_SIZE_SHARE)
-    return sizes, {s for s in sizes if w_bold[s] > w[s] * BOLD_COMMON_SHARE}
+def is_table(plain, tokens):
+    """表格行：没有句读、且有两个以上数字串或数字占比高；有句读的，只有数字串占多数又没有句号时才算。"""
+    digits = sum(c.isdigit() for c in plain) / len(plain)
+    nums = sum(bool(NUM_TOKEN_RE.fullmatch(t)) for t in tokens)
+    if not any(p in plain for p in BODY_PUNCT):
+        return nums >= 2 or digits >= 0.3
+    return '。' not in plain and nums >= 4 and nums >= len(tokens) * 0.5
 
 
-def column_widths(lines, sizes):
-    """“写满一行”的宽度：同一页、同一左边界（10pt 一档）的正文行宽取较宽的一半的中位数；
-    这一档行数太少时（单独一行的小标题）改用整页正文行的同一统计量，键为 (页码, None)。"""
-    widths = defaultdict(list)
-    for ln in lines:
-        if any(abs(ln['size'] - s) <= SIZE_TOL for s in sizes):
-            widths[(ln['page'], round(ln['x0'] / 10))].append(ln['x1'] - ln['x0'])
-            widths[(ln['page'], None)].append(ln['x1'] - ln['x0'])
-    return {k: statistics.median(sorted(v)[len(v) // 2:]) for k, v in widths.items() if k[1] is None or len(v) >= 3}
+def classify(text):
+    """返回 'body'、'label'（没有句读的短行：小标题、侧栏、图例，在 assemble 中再细分）或剔除的类别。"""
+    plain = re.sub(r'\s', '', text)
+    if PAGE_NO_RE.fullmatch(plain):
+        return 'header'
+    short = width(plain) <= SHORT_DROP_MAX
+    if CAPTION_RE.search(text) or short and SHORT_CAPTION_RE.search(plain):
+        return 'caption'
+    if META_RE.search(text) or short and SHORT_DROP_RE.search(plain):  # 按去掉空白的文字匹配（“方  正  证  券  研  究  所”）
+        return 'header'
+    if short and SIDEBAR_FIELD_RE.search(plain) and not any(p in plain for p in BODY_PUNCT):
+        return 'sidebar'
+    if not CJK_RE.search(plain):
+        # 没有汉字的行：只保留像英文句子的长行（有 the/and/of 等虚词，正文中的英文换行），图例、表格单元格、坐标轴刻度丢弃
+        if len(plain) >= 20 and re.search(r'\b(the|and|of|to|in|for|with|is|are|on|by)\b', text, re.I) and not is_table(plain, text.split()):
+            return 'body'
+        return 'chart'
+    if is_table(plain, text.split()):
+        return 'table'
+    return 'body' if any(p in plain for p in BODY_PUNCT) else 'label'
 
 
-def is_full(ln, full_w):
-    w = full_w.get((ln['page'], round(ln['x0'] / 10))) or full_w.get((ln['page'], None), 0)
-    return ln['x1'] - ln['x0'] >= w * 0.85
+def line_width(segs):
+    """本篇折行的“写满一行”宽度：句子没写完就换行的正文行宽，取较宽一半的中位数；这样的行少于 3 行时返回 None。"""
+    ws = sorted(width(a['text']) for a, b in zip(segs, segs[1:])
+                if a['kind'] == 'body' and b['kind'] == 'body' and not b['hard'] and 12 <= width(a['text']) <= 80
+                and a['text'].rstrip()[-1:] not in SENT_END + '：:')
+    if len(ws) < 3:
+        return None
+    top = ws[len(ws) // 2:]
+    return top[len(top) // 2]
 
 
-def classify(ln, sizes, bold_common, full_w, company=''):
-    """返回 'body'、'heading'（小标题，作为后续段落的 section）、'label'（只作分段点，文字丢弃）或 None（丢弃）。"""
-    t = ln['text']
-    if not CJK_RE.search(t):
-        # 没有汉字的行：只保留像英文句子的长行（正文中的英文名称换行），表格单元格、坐标轴刻度丢弃
-        return 'body' if len(t) >= 20 and re.search(r'[A-Za-z]{2,}\s+[A-Za-z]{2,}', t) else None
-    near = [s for s in sizes if abs(ln['size'] - s) <= SIZE_TOL]
-    plain = re.sub(r'\s', '', t)
-    if plain == company or RATING_RE.search(plain) and len(plain) <= 15:
-        return 'label' if near or ln['size'] > max(sizes) else None
-    # 明显大于正文的字号：章节标题，可以较长、带逗号（跨两行的标题在 assemble 中拼接）
-    if (max(sizes) + 1.5 <= ln['size'] < max(sizes) + 8 and len(plain) <= HEADING_MAX_LEN * 2
-            and plain[-1] not in '。；' and len(CJK_RE.findall(plain)) >= 2):
-        return 'heading'
-    if (len(plain) <= HEADING_MAX_LEN and plain[-1] not in SENT_END + '，,、：:' and len(CJK_RE.findall(plain)) >= 2
-            and not is_full(ln, full_w)):
-        if max(sizes) + SIZE_TOL < ln['size'] < max(sizes) + 8:
-            return 'heading'
-        if near and (ln['bold'] and near[0] not in bold_common or HEADING_NUM_RE.match(t) and not is_prose(t)):
-            return 'heading'
-        # 正文字号的独立短行：没写满、句中没有逗号句号，可能是小标题，也可能是侧栏栏目名（如“基本数据”）或日期，只作分段点；
-        # 带编号的短行（如“2）行业竞争加剧”）是列表项的标题，留在正文里
-        if near and not any(c in plain for c in '，。；,;') and not BULLET_RE.match(t):
-            return 'label'
-    return 'body' if near else None
+def is_title(lines, full_w, max_w=HEADING_MAX_LEN):
+    """只有一行、没写满、不以句号逗号等结尾、句中没有句号分号的短句：小标题。"""
+    if len(lines) != 1:
+        return False
+    t = lines[0].strip()
+    limit = min(max_w, full_w * 0.75) if full_w else max_w
+    return (width(t) <= limit and len(CJK_RE.findall(t)) >= 2 and t[-1:] not in SENT_END + '，,、”’）)'
+            and not re.search('[。；]', t))
 
 
-def assemble(lines, full_w):
-    """把逐行文字拼成段落：返回 [{'page','section','text'}]。"""
-    paras, cur, section, prev, prev_head = [], [], '', None, None
+def assemble(segs, full_w, drop):
+    """把片段拼成段落：返回 [{'section','text'}]。页眉页脚、图表标题、无汉字行不打断句子；表格和侧栏短行另起一段。"""
+    seq = []
+    for s in segs:
+        if s['kind'] in ('header', 'caption', 'chart'):
+            drop[s['kind']] += nchars(s['text'])
+        else:
+            seq.append(s)
+    # 后面紧跟日期的行、以“-2024/02/25”结尾的行：相关研究条目
+    for a, b in zip(seq, seq[1:] + [None]):
+        if a['kind'] in ('body', 'label') and (b and DATE_ONLY_RE.fullmatch(re.sub(r'\s', '', b['text'])) or DATE_TAIL_RE.search(a['text'])):
+            a['kind'] = 'meta'
+    paras, cur, section = [], [], ''
 
     def flush():
+        nonlocal section
         if cur:
-            paras.append({'page': cur[0]['page'], 'section': section, 'text': join_lines(cur)})
+            if is_title(cur, full_w):
+                section = re.sub(r'\s+', ' ', cur[0]).strip()
+                drop['heading'] += nchars(section)
+            else:
+                paras.append({'section': section, 'text': join_lines(cur)})
             cur.clear()
 
-    for ln in lines:
-        if ln['kind'] == 'label' and prev is not None and continues(prev, ln):
-            ln['kind'] = 'body'  # 句子还没结束：这是正文的最后一行（如图表前的半行），不是栏目名
-        if ln['kind'] == 'label' and RISK_HEAD_RE.match(ln['text']):
-            ln['kind'] = 'heading'  # 风险栏目名要记成小节，后面的风险清单才能整节剔除
-        if ln['kind'] in ('heading', 'label'):
-            flush()
-            if ln['kind'] == 'heading':
-                text = re.sub(r'\s+', ' ', ln['text']).strip()
-                # 紧接在上一行标题下方的标题行是同一个标题的续行
-                joined = prev_head and prev_head['page'] == ln['page'] and 0 <= ln['y0'] - prev_head['y1'] < (ln['y1'] - ln['y0'])
-                section = section + text if joined else text
-                prev_head = ln
-            prev = None
+    for i, s in enumerate(seq):
+        kind, t = s['kind'], s['text']
+        nxt = next((x for x in seq[i + 1:i + 3] if x['kind'] != 'meta'), None)
+        if kind == 'meta':
+            drop['header'] += nchars(t)
             continue
-        prev_head = None
-        if prev is not None and (ln['page'] - prev['page'] > 1 or len(cur) > 1 and punct_density(join_lines(cur)) < MIN_PUNCT_DENSITY):
-            flush()  # 隔页的、或接在表格残留后面的行，不当作句子的延续
-        elif prev is not None and prev['text'].rstrip()[-1:] in SENT_END + '”’）)':  # 上一行以句末标点结尾才可能分段
-            line_h = max(prev['y1'] - prev['y0'], 1)
-            same_page = ln['page'] == prev['page']
-            if (BULLET_RE.match(ln['text']) or not is_full(prev, full_w) or ln['block'] != prev['block']
-                    or same_page and (ln['x0'] - prev['x0'] > line_h * 0.8 or ln['y0'] - prev['y1'] > line_h * 1.2)):
+        if kind == 'label':
+            if full_w and width(t) >= full_w * 0.8 and cjk_share(t) >= 0.6:
+                kind = 'body'  # 写满一行、只是恰好没有标点的正文行
+            elif (RISK_HEAD_RE.match(t) or nxt and nxt['kind'] == 'body' and not RATING_RE.search(t) and not SIDEBAR_LABEL_RE.search(t)
+                  and width(t) <= HEADING_MAX_LEN + 10 and len(CJK_RE.findall(t)) >= 2):
                 flush()
-        cur.append(ln)
-        prev = ln
+                section = re.sub(r'\s+', ' ', t).strip()  # 紧跟正文的短行是小标题；风险栏目名要记成小节，后面的风险清单才能整节剔除
+                drop['heading'] += nchars(t)
+                continue
+        if kind == 'body':
+            if cur and (s['hard'] or ends_sentence(cur[-1]) or is_title(cur, full_w)
+                        or BULLET_RE.match(t) and is_title(cur, None, HEADING_MAX_LEN + 10)):
+                flush()
+            cur.append(t)
+            continue
+        flush()
+        drop['sidebar' if kind == 'label' else kind] += nchars(t)
     flush()
     return paras
-
-
-def continues(prev, ln):
-    """ln 是否紧接在 prev 下方、同一栏，且 prev 没有以句末标点结尾。"""
-    line_h = max(prev['y1'] - prev['y0'], 1)
-    return (prev['text'].rstrip()[-1:] not in SENT_END and ln['page'] == prev['page']
-            and abs(ln['x0'] - prev['x0']) < line_h * 2 and 0 <= ln['y0'] - prev['y1'] < line_h * 1.2)
 
 
 def join_lines(lines):
     """中文行之间直接相连，英文/数字之间补一个空格。"""
     out = ''
-    for ln in lines:
-        t = ln['text'].strip()
+    for t in lines:
+        t = t.strip()
         if out and re.match(r'[A-Za-z0-9]', t) and re.search(r'[A-Za-z0-9,.%]$', out):
             out += ' '
         out += t
@@ -300,12 +370,25 @@ def strip_risk(paras):
     return out
 
 
-def tidy(paras):
-    """丢掉表格残留，短段并入同一小节的相邻段，长段按句切开。"""
-    paras = [p for p in paras if len(CJK_RE.findall(p['text'])) >= 10 and cjk_share(p['text']) >= MIN_CJK_SHARE
-             and punct_density(p['text']) >= MIN_PUNCT_DENSITY]
-    merged = []
+def tidy(paras, drop=None):
+    """丢掉声明套话、表格残留、无句末标点的短段和重复段，短段并入同一小节的相邻段，长段按句切开。
+    汉字占比低但有句号、句读密的段落（数字很多的业绩描述）保留。重复按去掉标点空白后的文字比较（首页摘要常与正文逐字重复）。"""
+    drop = Counter() if drop is None else drop
+    kept, seen = [], set()
     for p in paras:
+        t = p['text']
+        key = re.sub(r'[\W_]', '', t)
+        if DISCLAIMER_TEXT_RE.search(t):
+            drop['disclaimer'] += nchars(t)
+        elif (len(CJK_RE.findall(t)) < 10 or punct_density(t) < MIN_PUNCT_DENSITY or key in seen
+              or cjk_share(t) < MIN_CJK_SHARE and not ('。' in t and punct_density(t) >= 3)
+              or len(t) < MIN_PARA_CHARS and not re.search(f'[{SENT_END}]', t)):
+            drop['residue'] += nchars(t)
+        else:
+            kept.append(p)
+            seen.add(key)
+    merged = []
+    for p in kept:
         if merged and merged[-1]['section'] == p['section'] and (
                 len(p['text']) < MIN_PARA_CHARS or len(merged[-1]['text']) < MIN_PARA_CHARS):
             merged[-1]['text'] += p['text']
@@ -314,51 +397,186 @@ def tidy(paras):
     return [{**p, 'text': t} for p in merged for t in split_long(p['text'])]
 
 
-def extract_pdf(path, company=''):
-    """一篇 PDF -> 段落列表 [{'page','section','text'}]，以及诊断信息。company 为公司简称，用来去掉首页的公司名标题。"""
-    import pymupdf  # 只在解析 PDF 时导入，report_logic 只用到 strip_risk，不需要装 pymupdf
-    doc = pymupdf.open(path)
-    pages = [page_lines(page, i + 1) for i, page in enumerate(doc)]
-    cut = find_disclaimer_start(pages)
-    if cut:
-        pi, li = cut
-        pages = pages[:pi] + [pages[pi][:li]]
-    pages = strip_repeated(pages)
-    heights = [page.rect.height for page in doc]
-    lines = [ln for page in pages for ln in page
-             if heights[ln['page'] - 1] * MARGIN_TOP <= ln['y1'] and ln['y0'] <= heights[ln['page'] - 1] * MARGIN_BOTTOM
-             and not DROP_LINE_RE.search(ln['text'])]
-    sizes, bold_common = body_style(lines)
-    info = {'pages': len(doc), 'disclaimer_page': cut and cut[0] + 1, 'body_sizes': sizes}
-    if not sizes:
-        return [], info
-    full_w = column_widths(lines, sizes)
-    for ln in lines:
-        ln['kind'] = classify(ln, sizes, bold_common, full_w, company)
-    return tidy(strip_risk(assemble([ln for ln in lines if ln['kind']], full_w))), info
+def parse_meta(path, root, text):
+    """能从路径和正文开头可靠取出的元数据，取不出的留空。"""
+    rel = path.relative_to(root)
+    meta = {'file': rel.as_posix(), 'date': '', 'broker': '', 'company': '', 'stock_code': '', 'title': ''}
+    year = re.search(r'(?:19|20)\d{2}', root.name)
+    parts = rel.parts[:-1]
+    if year and len(parts) >= 2 and re.fullmatch(r'\d{2}', parts[-2]) and re.fullmatch(r'\d{2}', parts[-1]):
+        meta['date'] = year.group(0) + parts[-2] + parts[-1]
+    lines = text.splitlines()
+    codes = {}
+    for line in lines[:META_HEAD_LINES]:
+        found = CODE_RE.findall(line)
+        if '《' in line or '相关' in line or len({c for _, c, _ in found}) != 1:
+            continue  # 相关研究、多只股票的表格行不算
+        name, code, suffix = found[0]
+        codes.setdefault(code, (name, suffix))
+    if len(codes) == 1:
+        code, (name, suffix) = next(iter(codes.items()))
+        meta['stock_code'] = f'{code}.{suffix.upper() or ("SH" if code[0] == "6" else "SZ")}'
+        if len(name) > 6:  # 名字前面粘着别的字（如“建议关注海南发展”）：取正文中反复出现的最长后缀
+            name = next((name[-k:] for k in range(6, 1, -1) if text.count(name[-k:]) >= 3), '')
+        meta['company'] = name if CJK_RE.search(name) else ''
+    votes = Counter()
+    for line in lines:
+        if SOURCE_LINE_RE.search(line):
+            hit = {canon for canon, aliases in BROKERS.items() if any(a in line for a in aliases)}
+            hit |= {m for m in BROKER_RE.findall(line) if not any(m in a or a in m for al in BROKERS.values() for a in al)}
+            votes.update(hit)
+    top = votes.most_common(2)
+    if top and (len(top) == 1 or top[0][1] > top[1][1]):
+        meta['broker'] = top[0][0]
+    return meta
 
 
-def main(pdf_dir, out_path, limit=None):
-    """pdf_dir 下的所有 PDF -> out_path（parquet，每行一个段落），同时在旁边写一份 .txt 便于人工检查抽取效果。"""
-    files = sorted(Path(pdf_dir).rglob('*.pdf'))[:limit]
-    rows, used_ids, preview = [], set(), []
+def extract_text(text, drop=None):
+    """一篇研报的全文 -> 段落列表 [{'section','text'}]。drop 累计各类被剔除内容的字数。"""
+    drop = Counter() if drop is None else drop
+    segs = split_segments(text, drop)
+    cut = find_disclaimer_start(segs)
+    if cut is not None:
+        drop['disclaimer'] += sum(nchars(s['text']) for s in segs[cut:])
+        segs = segs[:cut]
+    for s in segs:
+        s['kind'] = classify(s['text'])
+    strip_repeated(segs)
+    paras = assemble(segs, line_width(segs), drop)
+    no_risk = strip_risk(paras)
+    drop['risk'] += sum(nchars(p['text']) for p in paras) - sum(nchars(p['text']) for p in no_risk)
+    return tidy(no_risk, drop)
+
+
+def process_file(path, root):
+    """返回 (状态, 元数据, 段落列表, 剔除字数, 原文字数)；状态为 ok / empty（空文件、扫描件、乱码、外文研报）。"""
+    text, _ = read_text(path)
+    total = nchars(text)
+    meta = {'file': path.relative_to(root).as_posix()}
+    if len(CJK_RE.findall(text)) < MIN_REPORT_CJK:
+        return 'empty', meta, [], Counter(), total
+    drop = Counter()
+    paras = extract_text(text, drop)
+    return 'ok', parse_meta(path, root, text), paras, drop, total
+
+
+def sample_files(files, limit, seed):
+    """跨月份抽样：按所在月份目录分组，每组用固定种子打乱后轮流取，保证小样本覆盖所有月份。"""
+    groups = {}
     for f in files:
-        meta = parse_filename(f.stem)
-        rid = '_'.join(x for x in (meta['date'], meta['broker'], meta['stock_code']) if x) or f.stem
-        base, k = rid, 2
-        while rid in used_ids:  # 同一天同一券商对同一公司发了多篇
-            rid, k = f'{base}_{k}', k + 1
-        used_ids.add(rid)
-        paras, info = extract_pdf(f, meta['company'])
-        print(f'{f.name[:40]}：{info["pages"]} 页，声明从第 {info["disclaimer_page"]} 页起，'
-              f'正文字号 {info["body_sizes"]}，{len(paras)} 段 {sum(len(p["text"]) for p in paras)} 字')
-        preview.append(f'########## {rid} {meta["title"]}')
-        for i, p in enumerate(paras, 1):
-            rows.append({'report_id': rid, 'para_id': i, 'file': f.name, **meta, 'page': p['page'],
-                         'section': p['section'], 'text': p['text']})
-            preview.append(f'[{i}] p{p["page"]} 〔{p["section"]}〕 {p["text"]}')
-    out_path = Path(out_path)
+        groups.setdefault(f.parent.parent.name, []).append(f)
+    rng = random.Random(seed)
+    for k in sorted(groups):
+        rng.shuffle(groups[k])
+    picked, i = [], 0
+    while len(picked) < limit and any(i < len(g) for g in groups.values()):
+        picked += [groups[k][i] for k in sorted(groups) if i < len(groups[k])]
+        i += 1
+    return sorted(picked[:limit])
+
+
+class SimpleBar:
+    """没有 tqdm 时的进度条：已处理/总数、百分比、速度、预计剩余时间，用 \\r 原地刷新。"""
+
+    def __init__(self, total):
+        self.total, self.n, self.t0, self.last = total, 0, time.time(), 0.0
+
+    def update(self, k=1):
+        self.n += k
+        now = time.time()
+        if now - self.last < 0.2 and self.n < self.total:
+            return
+        self.last = now
+        rate = self.n / max(now - self.t0, 1e-9)
+        eta = (self.total - self.n) / rate if rate else 0
+        filled = int(30 * self.n / max(self.total, 1))
+        sys.stderr.write(f'\r|{"#" * filled}{"-" * (30 - filled)}| {self.n}/{self.total} {self.n * 100 / max(self.total, 1):5.1f}% '
+                         f'{rate:6.1f} 篇/秒 剩余 {int(eta // 60):02d}:{int(eta % 60):02d}')
+        sys.stderr.flush()
+
+    def close(self):
+        sys.stderr.write('\n')
+
+
+def progress(total):
+    try:
+        from tqdm import tqdm
+        return tqdm(total=total, unit='篇', dynamic_ncols=True, smoothing=0.05)
+    except ImportError:
+        return SimpleBar(total)
+
+
+def main(txt_dir, out_path, limit=None, seed=0):
+    """txt_dir 下的所有 .txt -> out_path（parquet，每行一个段落），同时在旁边写一份 .txt 便于人工检查抽取效果。
+    limit：只跨月份随机抽这么多篇（固定种子 seed，可复现），None 为全部。"""
+    for stream in (sys.stdout, sys.stderr):  # 输出被重定向时 Windows 默认用本地编码，写中文会出错
+        if not stream.isatty() and hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8', errors='replace')
+    root, out_path = Path(txt_dir), Path(out_path)
+    files = sorted(root.rglob('*.txt'))
+    if not files:
+        raise SystemExit(f'{root} 下没有 .txt 文件')
+    if limit:
+        files = sample_files(files, limit, seed)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pylist(rows), out_path)
-    out_path.with_suffix('.txt').write_text('\n'.join(preview) + '\n', encoding='utf-8')
-    print(f'共 {len(files)} 篇研报、{len(rows)} 个段落，已写入 {out_path}（预览：{out_path.with_suffix(".txt").name}）')
+    tmp_parquet, tmp_preview = out_path.with_name(out_path.name + '.tmp'), out_path.with_suffix('.txt.tmp')
+    status, drop, failed = Counter(), Counter(), []
+    total_chars = kept_chars = n_paras = 0
+    filled = Counter()
+    rows, t0 = [], time.time()
+    writer = pq.ParquetWriter(tmp_parquet, SCHEMA)
+    bar = progress(len(files))
+    try:
+        with open(tmp_preview, 'w', encoding='utf-8') as preview:
+            for f in files:
+                try:
+                    st, meta, paras, d, total = process_file(f, root)
+                except Exception as e:  # 单个文件出错（读不了、格式异常）记下来继续
+                    failed.append((f.relative_to(root).as_posix(), f'{type(e).__name__}: {e}'))
+                    status['failed'] += 1
+                    bar.update()
+                    continue
+                status[st] += 1
+                total_chars += total
+                drop.update(d)
+                if st == 'ok' and not paras:
+                    status['ok_no_paragraph'] += 1
+                if paras:
+                    rid = f.stem
+                    filled.update(k for k in ('date', 'broker', 'company', 'stock_code', 'title') if meta.get(k))
+                    filled['reports'] += 1
+                    preview.write(f'########## {rid} {meta["date"]} {meta["broker"]} {meta["company"]} {meta["stock_code"]} {meta["file"]}\n')
+                    for i, p in enumerate(paras, 1):
+                        rows.append({'report_id': rid, 'para_id': i, **meta, 'page': None, 'section': p['section'], 'text': p['text']})
+                        preview.write(f'[{i}] 〔{p["section"]}〕 {p["text"]}\n')
+                        kept_chars += nchars(p['text'])
+                    n_paras += len(paras)
+                if len(rows) >= 20000:
+                    writer.write_table(pa.Table.from_pylist(rows, SCHEMA))
+                    rows = []
+                bar.update()
+        if rows:
+            writer.write_table(pa.Table.from_pylist(rows, SCHEMA))
+    finally:
+        writer.close()
+        bar.close()
+    tmp_parquet.replace(out_path)
+    tmp_preview.replace(out_path.with_suffix('.txt'))
+    err_path = out_path.with_name(out_path.stem + '_errors.txt')
+    if failed:
+        err_path.write_text(''.join(f'{f}\t{e}\n' for f, e in failed), encoding='utf-8')
+
+    n_rep = filled['reports']
+    print(f'\n===== 完成：用时 {time.time() - t0:.0f} 秒 =====')
+    print(f'文件 {len(files)} 篇：有正文 {n_rep} 篇，空文件/扫描件/乱码/外文 {status["empty"]} 篇，'
+          f'有中文但没留下段落 {status["ok_no_paragraph"]} 篇，读取失败 {status["failed"]} 篇'
+          + (f'（清单见 {err_path.name}）' if failed else ''))
+    print(f'保留段落 {n_paras} 个、{kept_chars} 字，占原文 {total_chars} 字（不含空白）的 {kept_chars / max(total_chars, 1):.1%}')
+    print('剔除内容字数：' + '，'.join(f'{name} {drop[k]}（{drop[k] / max(total_chars, 1):.1%}）'
+                                  for k, name in DROP_NAMES.items() if drop[k]))
+    other = total_chars - kept_chars - sum(drop.values())
+    print(f'空文件等未抽取的字数及拼接、截断误差 {other}（{other / max(total_chars, 1):.1%}）')
+    print('元数据填充率（有正文的研报中）：' + '，'.join(f'{k} {filled[k] / max(n_rep, 1):.1%}'
+                                         for k in ('date', 'broker', 'company', 'stock_code', 'title')))
+    print(f'已写入 {out_path}（预览：{out_path.with_suffix(".txt").name}）')
+

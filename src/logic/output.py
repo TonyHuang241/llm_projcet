@@ -1,13 +1,19 @@
-"""第 5、6 步：全局去重（跨研报统一概念名称）和整理输出（JSON、parquet、各阶段的图）。"""
+"""第 5、6 步：全局去重（跨研报统一概念名称）和整理输出（每篇研报一个逻辑图数据文件、parquet、查看页面）。"""
+import hashlib
 import itertools
 import json
+import re
+import shutil
+import time
 from collections import Counter, defaultdict
+from pathlib import Path
 
 import networkx as nx
 import numpy as np
 
 from src.llm_client import log
 from src import fin_items
+from src.config import PKG_DIR, OutDir
 from src.logic.base import (LAYER_NAMES, ORIGIN_PRIORITY, ROOT, TEXT_ORIGINS, Step, as_bool, direction_of,
                                         name_key, parse_decisions, short, write_parquet)
 from src.logic.extract import rel_row
@@ -243,32 +249,80 @@ def stages(r, mapping):
                          extra={'n_subgraphs': r.info['n_subgraphs'], 'added': Counter(d['origin'] for *_, d in r.added)})]
 
 
+# 逻辑图数据：graphs/ 下每篇研报一个 .js 文件，另有目录 index.js 和全局名称表 global_names.js。内容是 JSON，外面包一层
+# 函数调用（如 LOGIC_GRAPH({...});），这样查看页面直接双击打开（file://）也能用 <script> 按需读取；分析代码用 read_graphs 读。
+VIEWER_TEMPLATE = PKG_DIR / 'viz' / 'logic_viewer.html'
+INDEX_FILE, GLOBAL_FILE = 'index.js', 'global_names.js'
+
+
+def graph_file(rid):
+    """一篇研报的数据文件在 graphs/ 下的相对路径：按名称前两个字符分子目录，免得一个目录里文件太多。"""
+    key = rid if re.fullmatch(r'[A-Za-z0-9_-]{4,80}', rid) else hashlib.md5(rid.encode('utf-8')).hexdigest()[:16]
+    return f'{key[:2].lower()}/{key}.js'
+
+
+def write_js(path, func, obj):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'{func}({json.dumps(obj, ensure_ascii=False, separators=(",", ":"))});\n', encoding='utf-8')
+
+
+def read_js(path):
+    text = Path(path).read_text(encoding='utf-8')
+    return json.loads(text[text.index('(') + 1:text.rindex(')')])
+
+
+def read_graphs(out_dir, stages=False):
+    """读回 write_outputs 写出的逻辑图：{'root', 'layers', 'model', 'embed_model', 'reports': [各篇的记录], 'global_names'}。
+    stages=False 时不带包含关系缩减之前的三个阶段图（只有查看页面用得到，占一多半体积）。"""
+    graphs = OutDir(out_dir).graphs
+    if not (graphs / INDEX_FILE).exists():
+        raise SystemExit(f'{graphs} 下没有逻辑图数据，请先运行 python extract_logic_chain.py')
+    index = read_js(graphs / INDEX_FILE)
+    reports = []
+    for x in index['reports']:
+        rec = read_js(graphs / x['file'])
+        if not stages:
+            rec.pop('stages', None)
+        reports.append(rec)
+    return {**{k: index[k] for k in ('root', 'layers', 'model', 'embed_model')}, 'reports': reports,
+            'global_names': read_js(graphs / GLOBAL_FILE)}
+
+
 def write_outputs(reports, mapping, global_table, out_dir, model, embed_model):
-    """写出 report_graphs.json、edges.parquet、nodes.parquet，返回 (各篇的记录, 全局节点表, 边表)。"""
-    records, edge_table = [], []
+    """写出 data/graphs/（每篇研报一个数据文件、目录、全局名称表）、data/edges.parquet、data/nodes.parquet 和入口页面，
+    返回 (各篇的统计, 全局节点表, 边表)。各篇的图写完就丢掉，不在内存里攒着。"""
+    out = OutDir(out_dir).make()
+    if out.graphs.exists():
+        shutil.rmtree(out.graphs)  # 上一次运行留下的图（研报范围可能不同）
+    index, stats, edge_table = [], [], []
+    in_reports, layer = defaultdict(set), {}
     for r in reports:
         rec = graph_record(r, mapping)
         rec['stages'] = stages(r, mapping)
-        records.append(rec)
+        file = graph_file(r.rid)
+        write_js(out.graphs / file, 'LOGIC_GRAPH', rec)
+        index.append({**r.meta, 'file': file, 'n_concepts': rec['stats']['n_concepts'], 'n_edges': rec['stats']['n_edges'],
+                      'reach': round(rec['stats']['reach'], 3)})
+        stats.append(rec['stats'])
         node = {n['id']: n for n in rec['nodes']}
         edge_table += [{'report_id': r.rid, 'source': e['source'], 'target': e['target'], 'source_global': node[e['source']]['label'],
                        'target_global': node[e['target']]['label'], 'source_layer': node[e['source']]['layer'],
                        'target_layer': node[e['target']]['layer'], 'direction': e['direction'], 'origin': e['origin'],
                        'weight': e['weight'], 'evidence': ' | '.join(e['evidence']), 'para_ids': ','.join(map(str, e['para_ids']))}
                       for e in rec['edges']]
-    in_reports, layer = defaultdict(set), {}
-    for rec in records:
         for n in rec['nodes']:
-            in_reports[n['label']].add(rec['report_id'])
+            in_reports[n['label']].add(r.rid)
             layer.setdefault(n['label'], n['layer'])
     node_rows = [{'node': c, 'layer': layer[c], 'n_reports': len(in_reports[c]),
                   'members': '、'.join(sorted({n for n, gl in mapping.items() if gl == c and n != c}))}
                  for c in sorted(in_reports, key=lambda c: (layer[c], -len(in_reports[c]), c))]
-    (out_dir / 'report_graphs.json').write_text(
-        json.dumps({'root': ROOT, 'layers': LAYER_NAMES, 'model': model, 'embed_model': embed_model, 'reports': records,
-                    'global_names': global_table}, ensure_ascii=False, indent=1), encoding='utf-8')
-    write_parquet(edge_table, out_dir / 'edges.parquet',
+    write_js(out.graphs / INDEX_FILE, 'LOGIC_INDEX',
+             {'root': ROOT, 'layers': LAYER_NAMES, 'model': model, 'embed_model': embed_model,
+              'generated': time.strftime('%Y-%m-%d %H:%M'), 'reports': index})
+    write_js(out.graphs / GLOBAL_FILE, 'LOGIC_GLOBAL_NAMES', global_table)
+    write_parquet(edge_table, out.data / 'edges.parquet',
                   ['report_id', 'source', 'target', 'source_global', 'target_global', 'source_layer', 'target_layer',
                    'direction', 'origin', 'weight', 'evidence', 'para_ids'])
-    write_parquet(node_rows, out_dir / 'nodes.parquet', ['node', 'layer', 'n_reports', 'members'])
-    return records, node_rows, edge_table
+    write_parquet(node_rows, out.data / 'nodes.parquet', ['node', 'layer', 'n_reports', 'members'])
+    shutil.copyfile(VIEWER_TEMPLATE, out.viewer)
+    return stats, node_rows, edge_table
