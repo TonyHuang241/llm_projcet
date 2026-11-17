@@ -4,8 +4,30 @@
     {
       "name": "report-logic-html",
       "runtimeExecutable": "C:/Users/hung/projects/.venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "research_report/output/report_logic"],
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8765",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "output/report_logic"
+      ],
       "port": 8765
+    },
+    {
+      "name": "intro-page",
+      "runtimeExecutable": "C:/Users/hung/projects/.venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8766",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "docs"
+      ],
+      "port": 8766
     }
   ]
 }

@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>研报逻辑图：抽取流程、可信度与分歧度量</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f8f5ee; --surface: #fdfbf6; --line: #ddd6c6; --rule: #2a2622; --ink: #1f1c18; --ink2: #5a544a; --ink3: #8c8577;
+  --mark: #f5e8b0; --mark-on: #edc63f; --neg: #b8402f; --shade: 84, 66, 40;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --acc: #8c8577; --root: #1f1c18;
+  --serif: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", "STSong", "SimSun", Georgia, serif;
+  --sans: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #181614; --surface: #1f1d1a; --line: #3b3731; --rule: #d9d3c5; --ink: #ece7dc; --ink2: #b9b2a3; --ink3: #8a8375;
+    --mark: #4b4118; --mark-on: #8a6f0c; --neg: #e07a66; --shade: 214, 196, 160;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --acc: #8a8375; --root: #ece7dc;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.75 var(--sans); }
+main { max-width: 1320px; margin: 0 auto; padding: 0 24px 96px; }
+header { padding: 56px 0 20px; border-bottom: 2px solid var(--rule); }
+h1 { font: 600 30px/1.35 var(--serif); margin: 0 0 14px; letter-spacing: .01em; max-width: 860px; }
+h2 { font: 600 22px/1.4 var(--serif); margin: 64px 0 14px; padding-top: 14px; border-top: 1px solid var(--rule); scroll-margin-top: 44px; }
+h3 { font: 600 16.5px/1.5 var(--serif); margin: 32px 0 8px; }
+p { margin: 8px 0; max-width: 800px; }
+b { font-weight: 600; }
+.lead { color: var(--ink2); font-size: 15.5px; }
+nav { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); padding: 9px 0;
+  display: flex; gap: 22px; flex-wrap: wrap; font-size: 13px; letter-spacing: .02em; }
+nav a { color: var(--ink3); text-decoration: none; }
+nav a:hover { color: var(--ink); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 3px; padding: 16px 18px; margin: 14px 0; }
+.hint { color: var(--ink3); font-size: 13px; }
+/* 版式：逻辑图独占一行，原文、矩阵和说明放在图的下面 */
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; margin: 14px 0; }
+.cols > .card { margin: 0; }
+.cols.text-info { grid-template-columns: minmax(0, 7fr) minmax(0, 4fr); }
+.cols.mx-info { grid-template-columns: minmax(0, 680px) minmax(0, 1fr); }
+@media (max-width: 860px) { .cols, .cols.text-info, .cols.mx-info { grid-template-columns: minmax(0, 1fr); } }
+
+/* 数字：不加框，用细线分隔 */
+.tiles { display: flex; flex-wrap: wrap; margin: 16px 0 6px; row-gap: 14px; }
+.tile { padding: 0 22px; border-left: 1px solid var(--line); min-width: 120px; max-width: 250px; }
+.tile:first-child { padding-left: 0; border-left: none; }
+.tile b { display: block; font: 600 25px/1.25 Georgia, "Times New Roman", var(--serif); font-variant-numeric: tabular-nums; }
+.tile span { display: block; color: var(--ink2); font-size: 13px; line-height: 1.5; margin-top: 2px; }
+.tile.key b { box-shadow: inset 0 -0.42em 0 var(--mark); display: inline-block; padding: 0 2px; }
+
+/* 流程 */
+.steps { display: flex; flex-wrap: wrap; margin: 16px 0 0; border-bottom: 1px solid var(--line); }
+.steps button { flex: 1 1 110px; text-align: left; background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  padding: 8px 10px 9px 0; color: var(--ink2); font: inherit; font-size: 13.5px; cursor: pointer; }
+.steps button small { display: block; color: var(--ink3); font-size: 11.5px; }
+.steps button:hover { color: var(--ink); }
+.steps button.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--rule); }
+#step-body { border: none; background: none; padding: 14px 0 0; margin: 0; }
+.step-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; }
+@media (max-width: 700px) { .step-body { grid-template-columns: minmax(0, 1fr); } }
+.step-body h4 { margin: 0 0 4px; font-size: 12.5px; color: var(--ink3); font-weight: 500; letter-spacing: .04em; }
+.step-body ul { margin: 0; padding-left: 18px; }
+.step-body li { margin: 3px 0; }
+
+/* 逻辑图：按画布原尺寸显示，不随容器缩小；容器不够宽时横向滚动 */
+.graph-box { overflow-x: auto; padding: 4px 0; scroll-margin: 56px 0 16px; }
+.graph-box svg { display: block; margin: 0 auto; }
+.node rect.box { fill: var(--bg); stroke: var(--line); }
+.node rect.bar { stroke: none; }
+.node text { fill: var(--ink); font-size: 14px; font-family: var(--sans); pointer-events: none; }
+.node, .edge { cursor: pointer; transition: opacity .12s; }
+.node:hover rect.box { stroke: var(--ink3); }
+.edge path.line { fill: none; stroke: var(--ink3); stroke-width: 1.5; }
+.edge polygon { fill: var(--ink3); }
+.edge.neg path.line { stroke: var(--neg); } .edge.neg polygon { fill: var(--neg); }
+.edge.logic path.line { stroke-dasharray: 6 4; }
+.edge.preset path.line { stroke-width: 1.2; opacity: .65; }
+.edge path.hit { fill: none; stroke: transparent; stroke-width: 16; }
+.edge:hover path.line { stroke: var(--ink); } .edge:hover polygon { fill: var(--ink); }
+svg.sel .node:not(.on) { opacity: .22; } svg.sel .edge:not(.on) { opacity: .12; }
+svg.sel .edge.on path.line { stroke-width: 2.6; stroke: var(--ink); } svg.sel .edge.on polygon { fill: var(--ink); }
+svg.sel .edge.on.neg path.line { stroke: var(--neg); } svg.sel .edge.on.neg polygon { fill: var(--neg); }
+svg.sel .node.on rect.box { stroke: var(--ink2); }
+.legend { display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 13.5px; color: var(--ink2); margin: 2px 0 10px; align-items: center; }
+.legend:empty { display: none; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 1px; margin-right: 5px; vertical-align: 0; }
+.legend i.ln { width: 24px; height: 0; border-top: 1.5px solid var(--ink3); border-radius: 0; vertical-align: 4px; }
+.legend i.ln.dash { border-top-style: dashed; } .legend i.ln.neg { border-top-color: var(--neg); }
+.legend button { font: inherit; color: var(--ink2); background: none; border: none; border-bottom: 1px solid var(--line); padding: 0 1px 1px; cursor: pointer; }
+.legend button:hover { color: var(--ink); border-bottom-color: var(--ink3); }
+.legend button.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--rule); }
+.info { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; font-size: 14px; min-height: 60px; }
+.side .info { border-top: none; margin-top: 0; padding-top: 0; }
+.info .ttl { font-weight: 600; }
+.info q { display: block; quotes: none; margin: 5px 0; padding: 3px 10px; border-left: 2px solid var(--mark-on); color: var(--ink); font-family: var(--serif); font-size: 14.5px; }
+.tag { display: inline-block; font-size: 12px; font-weight: 400; color: var(--ink3); margin-left: 8px; padding-left: 8px; border-left: 1px solid var(--line); line-height: 1.2; }
+.tag.neg { color: var(--neg); }
+
+/* 原文 */
+.text-box { max-height: 420px; overflow-y: auto; font: 14.5px/1.85 var(--serif); padding-right: 6px; }
+.text-box p { margin: 0 0 12px; max-width: none; }
+.text-box .pid { color: var(--ink3); font: 11.5px var(--sans); margin-right: 8px; }
+.text-box span.h { background: var(--mark); cursor: pointer; }
+.text-box span.h.iso { background: none; border-bottom: 1.5px dotted var(--ink3); }
+.text-box span.h.on { background: var(--mark-on); }
+.chips { display: flex; gap: 6px 8px; flex-wrap: wrap; margin: 6px 0; }
+.chips button { font: inherit; font-size: 13.5px; background: none; color: var(--ink); border: 1px dashed var(--ink3); border-radius: 2px; padding: 2px 9px; cursor: pointer; }
+.chips button.drop { border-style: solid; border-color: var(--line); }
+.chips button:hover { border-color: var(--ink); }
+.chips button.on { background: var(--mark-on); border-color: var(--ink2); border-style: solid; }
+
+/* 矩阵与表 */
+table { border-collapse: collapse; font-size: 13px; width: 100%; }
+th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+thead th { font-weight: 500; color: var(--ink3); font-size: 12px; letter-spacing: .03em; border-bottom: 1px solid var(--rule); }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+table.mx { table-layout: fixed; font-size: 14px; }
+table.mx th { font-weight: 400; color: var(--ink2); font-size: 13px; letter-spacing: 0; border-bottom: none; }
+table.mx thead th { vertical-align: bottom; line-height: 1.3; text-align: center; padding: 4px 3px 8px; border-bottom: 1px solid var(--line); }
+table.mx tbody tr { height: 44px; }  /* 没有数值的行和有数值的行一样高 */
+table.mx tbody th { padding: 8px 8px 8px 0; vertical-align: middle; line-height: 1.4; }
+table.mx td { text-align: center; font-variant-numeric: tabular-nums; cursor: pointer; padding: 8px 2px; border: 2px solid var(--surface); vertical-align: middle; }
+table.mx td.sum { cursor: default; color: var(--ink3); }
+table.mx td.on { outline: 1.5px solid var(--ink); outline-offset: -2px; }
+table.mx th i { display: inline-block; width: 9px; height: 9px; border-radius: 1px; margin-right: 6px; }
+.sub { font-size: 13px; color: var(--ink3); margin: 0 0 8px; letter-spacing: .02em; }
+details { margin: 18px 0; } summary { cursor: pointer; color: var(--ink2); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 4px; }
+summary:hover { color: var(--ink); }
+.formula { font: 17px/1.8 var(--serif); padding: 8px 0 8px 16px; border-left: 2px solid var(--rule); margin: 14px 0; max-width: none; }
+
+/* 分歧样例：标题与解读 → 数值 → 主题 → 两张图各占一行 → 两张矩阵并排 */
+.pair h3 { margin-top: 4px; }
+.pair .tile span { font-size: 13.5px; }
+.pair .gblock { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
+.pair .gblock .info { border-top: none; margin-top: 4px; padding-top: 0; }
+.pair .cols.mx-pair { gap: 24px; margin: 14px 0 0; padding-top: 14px; border-top: 1px solid var(--line); }
+footer { margin-top: 64px; color: var(--ink3); font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 14px; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>从券商研报中抽取估值逻辑图，并度量研报之间的逻辑分歧</h1>
+  <p class="lead">每篇研报被整理成一张分五层的有向图：原文里的概念逐层连到会计科目，再连到公司估值。有了图，就可以比较同一家公司的不同研报在“讨论什么”和“怎么推理”上的异同。本页用具体的研报样例说明流程、抽取结果是否忠于原文，以及分歧度量是否和图上看到的差异一致。</p>
+  <div class="tiles" id="head-tiles"></div>
+</header>
+<nav>
+  <a href="#s1">1 产出什么</a><a href="#s2">2 抽取流程</a><a href="#s3">3 抽取可信吗</a><a href="#s4">4 分歧度量方法</a><a href="#s5">5 分歧度量有效吗</a>
+</nav>
+
+<h2 id="s1">1　这个方法产出什么</h2>
+<p>下面是一篇研报的成品：国金证券 2026 年 10 月 18 日的海康威视三季报点评。左边是研报提到的经营层面的概念，向右逐层传导到会计科目，最后到公司估值。</p>
+<p class="hint">点任意节点可以看它的上游和下游；点任意一条边可以看它出自原文的哪句话；点空白处恢复。</p>
+<div class="card" id="g-intro"></div>
+
+<h2 id="s2">2　抽取流程</h2>
+<p>流程分七步。设计上的一条原则是：<b>能由程序核对的，不交给大模型判断</b>。大模型负责读原文、提出概念和关系；每一条关系是否有原文出处、名称是否合法、图里有没有环，都由程序检查，不合格的退回重做；关系本身是否成立仍由大模型判断，程序保证的是每条从原文抽出的关系都附有一句可查验的真实原文。</p>
+<p class="hint">点下面的步骤查看这一步的分工。</p>
+<div class="steps" id="steps"></div>
+<div class="card" id="step-body"></div>
+<h3>最后一次运行的数量</h3>
+<div class="tiles" id="funnel"></div>
+
+<h2 id="s3">3　抽取结果可信吗</h2>
+<p>可信度体现在两点：图上的每条原文边都能在原文里找到出处；原文里只是被提到、没有写出影响关系的概念，不会被硬连进图里。下面各用一篇研报说明。</p>
+
+<h3>样例 A：原文与逻辑图逐条对照</h3>
+<p>国金证券的海康威视点评。图上的每条边都有原文引文，没有流程补出来的边。图下方是研报原文，底色标出的是被引用的句子。</p>
+<p class="hint">点图上的边，原文里对应的句子会加深；点原文里标出的句子，图上对应的边会突出。</p>
+<div class="card" id="gA"></div>
+<div class="cols text-info">
+  <div class="card"><div class="sub">研报原文</div><div class="text-box" id="tA"></div></div>
+  <div class="card side"><div class="sub">说明</div><div class="info" id="iA"><span class="hint">点图上的边，这里显示它出自原文的哪句话；点节点，这里显示它的定义和上下游。</span></div></div>
+</div>
+
+<h3>样例 B：进了逻辑链的概念，和没进逻辑链的概念</h3>
+<p>华泰证券的海康威视点评。大模型读这篇研报时一共记下了 <span id="b-total"></span> 个概念，其中 <span id="b-in"></span> 个进了逻辑图，<span id="b-out"></span> 个没有进。区别在于原文有没有写出它影响什么。</p>
+<p class="hint">点下面“没进逻辑链”的概念，看它在原文里出现的句子（虚线下划线）；再点图上的边对比，进了逻辑链的概念在原文里都有“支撑”“推动”“考虑到……给予”这类关系表述。</p>
+<div class="card" id="gB"></div>
+<div class="cols text-info">
+  <div class="card"><div class="sub">研报原文</div><div class="text-box" id="tB"></div></div>
+  <div class="card">
+    <div class="sub">没进逻辑链的概念（原文提到了，但没有写出它通向估值的影响关系）</div>
+    <div class="chips" id="b-iso"></div>
+    <div class="sub" style="margin-top:12px">抽出来但没有采纳的关系</div>
+    <div class="chips" id="b-drop"></div>
+    <div class="info" id="b-info"><span class="hint">点上面的概念或关系、图上的节点或边查看说明。图中的虚线边是流程补全的逻辑边，点它可以看到补全理由而不是引文。</span></div>
+  </div>
+</div>
+
+<h3>全部 16 篇的情况</h3>
+<div class="tiles" id="trust"></div>
+
+<h2 id="s4">4　分歧度量方法</h2>
+<p>不同研报对同一件事的叫法不一样，直接按概念名称比较几乎对不上。度量分三步。</p>
+<h3>第一步：把概念归成主题，把会计科目归成两类</h3>
+<p>每家公司的全部概念由大模型归成若干主题。会计科目按估值模型的结构归成两类：<b>现金流</b>（收入、毛利率、费用、净利润等近期基本面）和<b>估值倍数</b>（折现率与长期成长预期）。PE、PB、DCF 等主流估值模型都可以写成“基本面 × 资本化因子”的形式，所以这个二分对各种估值方法都适用。</p>
+<div class="card"><div class="sub">海康威视 5 篇研报的主题</div><table id="themes"></table></div>
+<h3>第二步：把一篇研报的图变成“逻辑流分布”</h3>
+<p>每个概念放 1 单位流量，沿着边流向公司估值，遇到多条出边就平分。把每条边上的流量按“起点主题 → 终点主题或科目类别”加总并归一化，得到一张矩阵。<b>每行的合计</b>表示这个主题在全篇逻辑里的分量（讨论什么）；<b>行内的分布</b>表示这个主题的影响传向哪里（怎么关联）。</p>
+<p class="hint">点图上的边可以看到它承载的流量；点矩阵里的格子，图上对应的边会突出。</p>
+<div class="card" id="gM"></div>
+<div class="cols mx-info">
+  <div class="card"><div class="sub">国金证券 · 海康威视的逻辑流分布</div><div id="mM"></div></div>
+  <div class="card side"><div class="sub">说明</div><div class="info" id="iM"><span class="hint">点图上的边或矩阵里的格子，这里显示对应的边、它承载的流量和原文引文。</span></div></div>
+</div>
+<h3>第三步：比较两张矩阵</h3>
+<p>两篇研报的总分歧用两张矩阵的 JS 散度衡量，取值 0 到 1。它可以精确地拆成两项：</p>
+<p class="formula">总分歧 ＝ 主题项 ＋ 关系项　　　结构强度 ＝ 关系项 ÷ 共同主题的分量</p>
+<p><b>主题项</b>衡量两篇讨论的主题及其分量差多少。<b>关系项</b>衡量在两篇都讨论的主题上，影响的去向差多少；只有一篇讨论的主题不计入关系项。<b>结构强度</b>把关系项除以共同主题所占的分量，表示“在可比的部分上，推理结构差多少”，0 为完全相同，1 为完全不同。</p>
+
+<h2 id="s5">5　分歧度量有效吗</h2>
+<p>下面四对研报取自三家公司，结构强度从低到高，最后一对是关注点不同的情况。每个样例先给出解读和算出的数值，再依次是两篇研报按主题着色的逻辑图，最下面是各自的逻辑流矩阵。读者可以对照图判断数值是否合理。</p>
+<p class="hint">点主题名称，两张图里属于该主题的概念同时突出；点矩阵的格子，对应的边突出；点图上的边可以看原文引文。</p>
+<div id="pairs"></div>
+<details><summary>全部 37 对研报的数值</summary><div class="card" style="overflow-x:auto"><table id="all-pairs"></table></div></details>
+
+<footer>全部 16 篇研报的完整逻辑图可在 output/report_logic/report_logic_graphs.html 中查看。抽取所用模型：<span id="model"></span>。</footer>
+</main>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const NS = 'http://www.w3.org/2000/svg';
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const f2 = x => x == null ? '—' : x.toFixed(2);
+function h(tag, attrs, parent, html) {
+  const e = document.createElement(tag);
+  for (const k in attrs || {}) e.setAttribute(k, attrs[k]);
+  if (html != null) e.innerHTML = html;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function s(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs || {}) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const ORIGIN = {extracted: '原文', bridged: '跨段原文', logic: '逻辑补全', preset: '预置的会计关系'};
+const THEME_COLOR = {};  // 公司 -> 主题 -> 颜色
+for (const co in D.colors) { THEME_COLOR[co] = {}; D.colors[co].forEach((t, i) => THEME_COLOR[co][t] = `var(--s${i + 1})`); }
+const LAYER_COLOR = {1: 'var(--root)', 2: 'var(--acc)', 3: 'var(--s1)', 4: 'var(--s3)', 5: 'var(--s4)'};
+const groupColor = (co, g) => THEME_COLOR[co][g] || 'var(--acc)';
+
+// ---------- 逻辑图组件 ----------
+// opts: {color: 'layer' | 'theme', flow: 是否按流量画线宽, legend: 是否显示边的图例, title: 是否显示标题,
+//        info: 说明区元素（不给就在图下方新建）, idle: 说明区的默认内容, onPick(边号数组): 选中边时回调}
+// 图按画布原尺寸显示，不随容器缩小，容器不够宽时横向滚动。
+function mountGraph(host, g, opts = {}) {
+  const NW = 156, NH = 42, COLW = 208, ROWH = 56, PAD = 10;
+  const FS = 14, LH = 17, TX = 13, TW = NW - TX - 8;  // 节点字号（与 CSS 的 .node text 一致）、两行时的行距、文字起点、文字可用宽度
+  const AL = 9, AH = 4.5;  // 箭头的长度和半宽
+  const byId = new Map(g.nodes.map(n => [n.id, n]));
+  const cols = new Map();
+  g.nodes.forEach(n => { if (!cols.has(n.level)) cols.set(n.level, []); cols.get(n.level).push(n.id); });
+  const ks = [...cols.keys()].sort((a, b) => a - b), rows = Math.max(...ks.map(k => cols.get(k).length));
+  const nbr = new Map(g.nodes.map(n => [n.id, []]));
+  g.edges.forEach(e => { nbr.get(e.s).push(e.t); nbr.get(e.t).push(e.s); });
+  const y = new Map();
+  const place = k => cols.get(k).forEach((id, i) => y.set(id, i + (rows - cols.get(k).length) / 2));
+  ks.forEach(place);
+  for (let sweep = 0; sweep < 8; sweep++) {
+    for (const k of sweep % 2 ? [...ks].reverse() : ks) {
+      const b = new Map(cols.get(k).map(id => [id, nbr.get(id).length ? nbr.get(id).reduce((a, v) => a + y.get(v), 0) / nbr.get(id).length : y.get(id)]));
+      cols.get(k).sort((p, q) => b.get(p) - b.get(q));
+      place(k);
+    }
+  }
+  const maxK = ks[ks.length - 1];
+  const pos = id => ({x: PAD + (maxK - byId.get(id).level) * COLW, y: PAD + y.get(id) * ROWH});
+  const W = PAD * 2 + maxK * COLW + NW, H = PAD * 2 + (rows - 1) * ROWH + NH;
+
+  // 节点名称：一行放不下就折成两行（按字符数估算宽度：中文 1 个字宽，ASCII 约 0.55），两行还放不下就截断加省略号
+  const cw = c => (c.codePointAt(0) < 256 ? 0.55 : 1) * FS;
+  const width = cs => cs.reduce((t, c) => t + cw(c), 0);
+  function label(name) {
+    const cs = [...name];
+    if (width(cs) <= TW) return {lines: [name]};
+    let best = 0, cost = Infinity;
+    for (let k = 1; k < cs.length; k++) {  // 两行尽量等长，不拆开英文单词和数字
+      const a = width(cs.slice(0, k)), b = width(cs.slice(k)), c = Math.max(a, b) + (/\w/.test(cs[k - 1]) && /\w/.test(cs[k]) ? 1000 : 0);
+      if (a <= TW && b <= TW && c < cost) best = k, cost = c;
+    }
+    if (best) return {lines: [cs.slice(0, best).join('').trim(), cs.slice(best).join('').trim()]};
+    const fill = (k, room) => { for (let w = 0; k < cs.length && w + cw(cs[k]) <= room; k++) w += cw(cs[k]); return k; };
+    const k1 = fill(0, TW), k2 = fill(k1, TW - FS);  // 第二行给省略号留一个字宽
+    return {lines: [cs.slice(0, k1).join('').trim(), cs.slice(k1, k2).join('').trim() + '…'], cut: true};
+  }
+
+  host.innerHTML = '';
+  const head = h('div', {class: 'sub'}, host, `${esc(g.broker)} · ${g.date.slice(4, 6)}-${g.date.slice(6)} · ${esc(g.title)}`);
+  if (opts.title === false) head.remove();
+  const legend = h('div', {class: 'legend'}, host);
+  if (opts.color !== 'theme') {
+    [5, 4, 3, 2].forEach(k => { if (g.nodes.some(n => n.layer === k)) h('span', {}, legend, `<i style="background:${LAYER_COLOR[k]}"></i>${D.layers[k]}`); });
+  }
+  if (opts.legend !== false) {
+    h('span', {}, legend, '<i class="ln"></i>原文边');
+    if (g.edges.some(e => e.origin === 'logic')) h('span', {}, legend, '<i class="ln dash"></i>逻辑补全边');
+    if (g.edges.some(e => e.neg)) h('span', {}, legend, '<i class="ln neg"></i>负向');
+  }
+  const box = h('div', {class: 'graph-box'}, host);
+  const svg = s('svg', {width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': `${g.broker}研报的逻辑图`}, box);
+  const edgeEls = g.edges.map(e => {
+    const sw = opts.flow ? 1 + 1.1 * e.flow : 0, al = Math.max(AL, sw + 4), ah = Math.max(AH, sw / 2 + 3);  // 流量线越粗，箭头越大
+    const a = pos(e.s), b = pos(e.t), x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, xe = x2 - al, dx = (xe - x1) / 2;
+    const d = `M${x1},${y1} C${x1 + dx},${y1} ${xe - dx},${y2} ${xe},${y2}`;
+    const ge = s('g', {class: `edge ${e.origin}${e.neg ? ' neg' : ''}`}, svg);
+    const line = s('path', {class: 'line', d}, ge);
+    if (sw) line.style.strokeWidth = sw.toFixed(2);
+    s('polygon', {points: `${x2},${y2} ${xe},${y2 - ah} ${xe},${y2 + ah}`}, ge);
+    s('path', {class: 'hit', d}, ge);
+    ge.addEventListener('click', ev => { ev.stopPropagation(); api.pickEdges([e.i]); });
+    return ge;
+  });
+  const nodeEls = new Map();
+  g.nodes.forEach(n => {
+    const p = pos(n.id), gn = s('g', {class: 'node', transform: `translate(${p.x},${p.y})`}, svg), lb = label(n.id);
+    if (lb.cut) s('title', {}, gn).textContent = n.id;
+    s('rect', {class: 'box', width: NW, height: NH, rx: 2}, gn);
+    const color = n.layer === 1 ? 'var(--root)' : opts.color === 'theme' ? groupColor(g.company, n.group) : LAYER_COLOR[n.layer];
+    s('rect', {class: 'bar', width: 4, height: NH, x: 0, y: 0, fill: color}, gn);
+    const t = s('text', {x: TX, y: ((NH - (lb.lines.length - 1) * LH) / 2 + FS * 0.36).toFixed(1)}, gn);
+    lb.lines.forEach((ln, k) => { s('tspan', {x: TX, dy: k ? LH : 0}, t).textContent = ln; });
+    gn.addEventListener('click', ev => { ev.stopPropagation(); api.pickNode(n.id); });
+    nodeEls.set(n.id, gn);
+  });
+  svg.addEventListener('click', () => api.clear());
+  const info = opts.info || h('div', {class: 'info'}, host);
+  const idle = opts.idle || '<span class="hint">点节点或边查看详情。</span>';
+  info.innerHTML = idle;
+
+  // focus：选中来自图外（原文、矩阵、主题）时，图又比容器宽，就把选中的部分横向滚到可见
+  function show(nodes, edges, focus) {
+    svg.classList.add('sel');
+    nodeEls.forEach((el, id) => el.classList.toggle('on', nodes.has(id)));
+    edgeEls.forEach((el, i) => el.classList.toggle('on', edges.has(i)));
+    if (focus && nodes.size && box.scrollWidth > box.clientWidth) {
+      const xs = [...nodes].map(id => pos(id).x), a = Math.min(...xs) - PAD, b = Math.max(...xs) + NW + PAD, L = box.scrollLeft;
+      if (a < L || b > L + box.clientWidth) box.scrollLeft = b - a <= box.clientWidth ? (a + b - box.clientWidth) / 2 : a;
+    }
+  }
+  function walk(id, dir) {
+    const seen = new Set(), stack = [id];
+    while (stack.length) {
+      const u = stack.pop();
+      g.edges.forEach(e => { const v = dir > 0 ? (e.s === u ? e.t : null) : (e.t === u ? e.s : null); if (v && !seen.has(v)) { seen.add(v); stack.push(v); } });
+    }
+    return seen;
+  }
+  function edgeHtml(e) {
+    let out = `<div class="ttl">${esc(e.s)} → ${esc(e.t)}<span class="tag${e.neg ? ' neg' : ''}">${e.neg ? '负向' : '正向'}</span><span class="tag">${ORIGIN[e.origin]}</span>`;
+    if (opts.flow) out += `<span class="tag">流量 ${e.flow.toFixed(2)}</span>`;
+    out += '</div>';
+    e.ev.forEach((q, k) => out += `<q>${esc(q)}${e.pids[k] != null ? `<span class="hint">　第 ${e.pids[k]} 段</span>` : ''}</q>`);
+    if (e.origin === 'logic') out += `<div>原文没有写出这一步，流程从图中已有的节点里选了一个作为去向。补全理由：${esc(e.ctx.join('；'))}</div>`;
+    if (e.origin === 'preset' && !e.ev.length) out += '<div class="hint">会计科目之间的关系是预先设定的，不从原文抽取。</div>';
+    return out;
+  }
+  const api = {
+    g, host,
+    clear(silent) {
+      svg.classList.remove('sel');
+      info.innerHTML = idle;
+      if (!silent && opts.onPick) opts.onPick([]);
+    },
+    pickNode(id) {
+      const n = byId.get(id), up = walk(id, -1), down = walk(id, 1), nodes = new Set([id, ...up, ...down]);
+      const upSet = new Set([id, ...up]), downSet = new Set([id, ...down]);
+      const edges = new Set(g.edges.filter(e => (upSet.has(e.s) && upSet.has(e.t)) || (downSet.has(e.s) && downSet.has(e.t))).map(e => e.i));
+      show(nodes, edges);
+      info.innerHTML = `<div class="ttl">${esc(id)}<span class="tag">${D.layers[n.layer]}</span>${n.group && n.layer >= 3 ? `<span class="tag">主题：${esc(n.group)}</span>` : ''}</div>`
+        + (n.def ? `<div>${esc(n.def)}</div>` : '') + (n.orig ? `<div class="hint">本篇原文里的叫法：${esc(n.orig)}</div>` : '')
+        + `<div class="hint">上游 ${up.size} 个，下游 ${down.size} 个。</div>`;
+      if (opts.onPick) opts.onPick([]);
+    },
+    pickEdges(idx, silent) {
+      const es = idx.map(i => g.edges[i]);
+      show(new Set(es.flatMap(e => [e.s, e.t])), new Set(idx), silent);
+      info.innerHTML = es.map(edgeHtml).join('<hr style="border:none;border-top:1px solid var(--line);margin:8px 0">');
+      if (!silent && opts.onPick) opts.onPick(idx);
+    },
+    pickGroup(group) {
+      const nodes = new Set(g.nodes.filter(n => n.group === group).map(n => n.id));
+      const edges = new Set(g.edges.filter(e => nodes.has(e.s)).map(e => e.i));
+      g.edges.forEach(e => { if (edges.has(e.i)) nodes.add(e.t); });
+      show(nodes, edges, true);
+      info.innerHTML = nodes.size ? `<div class="ttl">主题：${esc(group)}</div><div class="hint">本篇属于这个主题的概念及它们的去向。</div>`
+        : `<div class="hint">这篇研报没有讨论“${esc(group)}”。</div>`;
+    },
+    pickCell(row, col) {
+      const es = g.edges.filter(e => byId.get(e.s).layer >= 3 && byId.get(e.s).group === row && byId.get(e.t).group === col);
+      if (!es.length) { show(new Set(), new Set()); info.innerHTML = `<div class="hint">这篇研报里没有“${esc(row)} → ${esc(col)}”的传导。</div>`; return; }
+      api.pickEdges(es.map(e => e.i), true);
+    },
+    reveal() { box.scrollIntoView({block: 'nearest', behavior: 'smooth'}); },  // 图不在视口内时滚到可见
+  };
+  return api;
+}
+
+// ---------- 原文组件 ----------
+function mountText(host, paras) {
+  host.innerHTML = '';
+  const spans = [];
+  let onClick = () => {};
+  paras.forEach(p => {
+    const el = h('p', {}, host, `<span class="pid">第 ${p.pid} 段</span>`);
+    p.segs.forEach(([text, keys]) => {
+      if (!keys.length) { el.appendChild(document.createTextNode(text)); return; }
+      const sp = h('span', {class: 'h' + (keys.every(k => k[0] === 'c') ? ' iso' : '')}, el, esc(text));
+      sp.dataset.k = keys.join(' ');
+      sp.addEventListener('click', () => onClick(keys));
+      spans.push([sp, keys]);
+    });
+  });
+  return {
+    onClick(fn) { onClick = fn; },
+    activate(keys) {
+      const set = new Set(keys);
+      let first = null;
+      spans.forEach(([sp, ks]) => { const on = ks.some(k => set.has(k)); sp.classList.toggle('on', on); if (on && !first) first = sp; });
+      if (first) {
+        const top = first.offsetTop - host.offsetTop;
+        if (top < host.scrollTop || top > host.scrollTop + host.clientHeight - 60) host.scrollTop = Math.max(0, top - host.clientHeight / 3);
+      }
+    },
+  };
+}
+
+// ---------- 逻辑流矩阵 ----------
+function mountMatrix(host, rid, rows, cols, onCell) {
+  const cell = new Map(D.dist[rid].map(([r, c, v]) => [r + '|' + c, v]));
+  const dot = name => `<i style="background:${groupColor(D.graphs[rid].company, name)}"></i>`;
+  let html = '<table class="mx"><thead><tr><th style="width:26%"></th>' + cols.map(c => `<th>${esc(c)}</th>`).join('') + '<th>合计</th></tr></thead><tbody>';
+  rows.forEach(r => {
+    let sum = 0;
+    html += `<tr><th>${dot(r)}${esc(r)}</th>`;
+    cols.forEach(c => {
+      const v = cell.get(r + '|' + c) || 0;
+      sum += v;
+      html += `<td data-r="${esc(r)}" data-c="${esc(c)}" style="background:rgba(var(--shade),${(v ? Math.min(0.07 + 0.7 * v, 0.42) : 0).toFixed(3)})">${v ? v.toFixed(2) : ''}</td>`;
+    });
+    html += `<td class="sum">${sum ? sum.toFixed(2) : ''}</td></tr>`;
+  });
+  host.innerHTML = html + '</tbody></table>';
+  const tds = [...host.querySelectorAll('td[data-r]')];
+  tds.forEach(td => td.addEventListener('click', () => onCell(td.dataset.r, td.dataset.c)));
+  return { mark(r, c) { tds.forEach(td => td.classList.toggle('on', td.dataset.r === r && td.dataset.c === c)); } };
+}
+function axes(rids) {
+  const used = new Set(rids.flatMap(rid => D.dist[rid].flatMap(([r, c]) => [r, c])));
+  const themes = D.colors[D.graphs[rids[0]].company].filter(t => used.has(t));
+  return {rows: themes.filter(t => rids.some(rid => D.dist[rid].some(([r]) => r === t))),
+          cols: [...themes.filter(t => rids.some(rid => D.dist[rid].some(([, c]) => c === t))), D.cash, D.mult].filter(c => used.has(c))};
+}
+
+// ---------- 各节 ----------
+const S = D.stats;
+$('head-tiles').innerHTML = `<div class="tile"><b>${S.reports}</b><span>篇研报</span></div>`
+  + `<div class="tile"><b>${Object.keys(S.companies).length}</b><span>家公司：${Object.entries(S.companies).map(([k, v]) => `${k} ${v}`).join('、')}</span></div>`
+  + `<div class="tile"><b>${S.concepts}</b><span>个进图的概念</span></div><div class="tile"><b>${S.edges}</b><span>条边</span></div>`;
+$('model').textContent = D.model;
+
+mountGraph($('g-intro'), D.graphs[D.sampleA.rid]);
+
+const STEPS = [
+  ['正文抽取', '程序', ['（不调用大模型）'], ['从 PDF 中取出正文段落，剔除图表、表格、侧栏、免责声明和风险提示。']],
+  ['概念分层填表', '大模型 + 核对', ['按顺序通读全文，维护一张“本篇概念表”：规范名、别名、一句定义、属于哪一层。', '整理同一层概念之间的包含关系。'],
+    ['会计科目和公司估值是预先设定的清单，不由模型生成。', '每个概念最多一个上位概念，不能跨层；包含关系里不能有环。', '不合格的条目退回重做。']],
+  ['原文连边', '大模型 + 核对', ['每段一次，抽出原文明确写出的“谁影响谁、正向还是负向”，并摘出原文引文。', '复核：把并列事项误抽成因果的关系删掉。'],
+    ['用字符串比对确认引文逐字出自本段原文（忽略空格和全半角），找不到就退回重做；这句话是否确实写出了这条影响关系，由大模型判断，读者可以点图上的边查看引文，自行查验。', '两端只能用概念表里的名称。', '连到估值倍数或公司估值时，引文里必须有相应字样。', '方向反了的关系（从下层指向上层）不进图。']],
+  ['子图补全', '大模型 + 核对', ['只处理走不到公司估值的子图。先回原文找有没有写明的关系；没有才补一条逻辑边，并写出理由。'],
+    ['补的原文边同样要通过引文的字符串比对。', '逻辑边只能从图里已有的、层级更靠近估值的节点中选，不能造新概念，所以不会成环。', '每个终点只补一条。逻辑边单独标记，可以整体剔除。']],
+  ['缩减与收尾', '程序', ['（不调用大模型）'], ['没有任何关系的孤立概念删掉。', '查环并去环，优先删逻辑边。', '已有更长链路的直连边剪掉。', '没有概念连入的会计科目删掉。']],
+  ['全局去重', '大模型 + 核对', ['不同研报里含义相同的概念，判断是否应当用同一个名称。'], ['候选对由向量相似度和名称包含关系筛出，模型只做是或否的判断。', '只统一名称，不改任何一篇的图。']],
+  ['输出', '程序', ['（不调用大模型）'], ['每篇一张图，连同每条边的引文、段落号和来源标记一并保存。']],
+];
+const stepBtns = STEPS.map(([name, who], i) => {
+  const b = h('button', {type: 'button'}, $('steps'), `${i}　${name}<small>${who}</small>`);
+  b.addEventListener('click', () => showStep(i));
+  return b;
+});
+function showStep(i) {
+  stepBtns.forEach((b, k) => b.classList.toggle('on', k === i));
+  const [name, , llm, prog] = STEPS[i], ul = xs => '<ul>' + xs.map(x => `<li>${x}</li>`).join('') + '</ul>';
+  $('step-body').innerHTML = `<div class="ttl" style="font-weight:600;margin-bottom:8px">第 ${i} 步　${name}</div><div class="step-body"><div><h4>大模型做什么</h4>${ul(llm)}</div><div><h4>程序做什么、核对什么</h4>${ul(prog)}</div></div>`;
+}
+showStep(2);
+$('funnel').innerHTML = [
+  [S.tableVars, '个概念记入各篇概念表'], [S.isolated, '个孤立概念被删掉'], [S.concepts, '个概念进入最终的图'],
+  [S.relations, '条关系从原文抽出'], [S.parallel + S.reverse, `条被判为并列（${S.parallel}）或方向相反（${S.reverse}）而不采纳`],
+  [S.origin.extracted + S.origin.bridged, `条原文边（其中跨段 ${S.origin.bridged} 条）`], [S.origin.logic, '条逻辑补全边'], [S.origin.preset, '条预置的会计关系'],
+].map(([n, t]) => `<div class="tile"><b>${n}</b><span>${t}</span></div>`).join('');
+
+// 样例 A：图在上；下面左栏原文，右栏是选中的边或节点的说明
+{
+  const info = $('iA'), text = mountText($('tA'), D.sampleA.text);
+  const graph = mountGraph($('gA'), D.graphs[D.sampleA.rid], {info, idle: info.innerHTML, onPick: idx => text.activate(idx.map(i => 'e' + i))});
+  text.onClick(keys => {
+    const idx = keys.filter(k => k[0] === 'e').map(k => +k.slice(1));
+    if (!idx.length) return;
+    graph.pickEdges(idx, true); text.activate(idx.map(i => 'e' + i)); graph.reveal();
+  });
+}
+// 样例 B：图在上；下面左栏原文，右栏是未进链概念、未采纳的关系和说明区（图上选中的节点和边也在说明区显示）
+{
+  const B = D.sampleB, g = D.graphs[B.rid], info = $('b-info'), idle = info.innerHTML;
+  const nIn = g.nodes.filter(n => n.layer >= 3).length;
+  $('b-in').textContent = nIn; $('b-out').textContent = B.iso.length; $('b-total').textContent = nIn + B.iso.length;
+  const text = mountText($('tB'), B.text);
+  const chips = [];
+  const reset = () => chips.forEach(c => c.classList.remove('on'));
+  const graph = mountGraph($('gB'), g, {info, idle, onPick: idx => { reset(); text.activate(idx.map(i => 'e' + i)); }});
+  function pick(btn, key, html) { graph.clear(true); reset(); btn.classList.add('on'); text.activate([key]); info.innerHTML = html; }
+  B.iso.forEach(c => {
+    const b = h('button', {type: 'button'}, $('b-iso'), esc(c.name));
+    chips.push(b);
+    b.addEventListener('click', () => pick(b, c.key, `<div class="ttl">${esc(c.name)}<span class="tag">${D.layers[c.layer]}</span><span class="tag">未进逻辑链</span></div><div>${esc(c.def)}</div><div class="hint">原文里它出现的句子已用虚线下划线标出。</div>`));
+  });
+  B.dropped.forEach(x => {
+    const b = h('button', {type: 'button', class: 'drop'}, $('b-drop'), `${esc(x.s)} → ${esc(x.t)}`);
+    chips.push(b);
+    b.addEventListener('click', () => pick(b, x.key, `<div class="ttl">${esc(x.s)} → ${esc(x.t)}<span class="tag">${x.kind}</span></div>${x.ev.map(q => `<q>${esc(q)}</q>`).join('')}`
+      + (x.reason ? `<div>判断理由：${esc(x.reason)}</div>` : '<div>原文写的是后者影响前者的方向，与图的层级方向相反，记录下来但不进图。</div>')));
+  });
+  text.onClick(keys => {
+    const idx = keys.filter(k => k[0] === 'e').map(k => +k.slice(1));
+    if (idx.length) { reset(); graph.pickEdges(idx, true); text.activate(idx.map(i => 'e' + i)); graph.reveal(); return; }
+    const key = keys[0], k = [...B.iso, ...B.dropped].findIndex(x => x.key === key);
+    if (k >= 0) chips[k].click();
+  });
+}
+$('trust').innerHTML = `<div class="tile key"><b>${S.quoted} / ${S.origin.extracted}</b><span>条原文边的引文经程序比对，确实逐字出自原文</span></div>`
+  + `<div class="tile"><b>${S.rerun.node}</b><span>同一批研报重跑，节点的重合度</span></div><div class="tile"><b>${S.rerun.edge}</b><span>同一批研报重跑，边的重合度</span></div>`
+  + `<div class="tile"><b>${Math.round(100 * S.origin.logic / S.edges)}%</b><span>的边是流程补全的逻辑边，均单独标记</span></div>`;
+
+// 方法
+$('themes').innerHTML = '<thead><tr><th style="width:18%">主题</th><th style="width:34%">含义</th><th>包含的概念</th></tr></thead><tbody>'
+  + D.themes.map(t => `<tr><td><i style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;background:${THEME_COLOR[D.sampleCompany][t.name]}"></i>${esc(t.name)}</td><td>${esc(t.def)}</td><td>${t.concepts.map(esc).join('、')}</td></tr>`).join('')
+  + `<tr><td><i style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;background:var(--acc)"></i>${D.cash} / ${D.mult}</td><td>会计科目的两个类别</td><td>营业收入、毛利率、归母净利润等归入现金流；估值倍数单列</td></tr></tbody>`;
+{  // 图在上；下面左边矩阵，右边是选中的边的说明
+  const rid = D.sampleA.rid, ax = axes([rid]), info = $('iM');
+  let mx;
+  const graph = mountGraph($('gM'), D.graphs[rid], {color: 'theme', flow: true, info, idle: info.innerHTML, onPick: () => mx && mx.mark()});
+  mx = mountMatrix($('mM'), rid, ax.rows, ax.cols, (r, c) => { graph.pickCell(r, c); mx.mark(r, c); });
+}
+
+// 分歧样例：标题与解读 → 数值 → 主题 → 两张图各占一行 → 两张矩阵并排
+D.pairs.forEach(p => {
+  const card = h('div', {class: 'card pair'}, $('pairs'));
+  h('h3', {}, card, esc(p.title));
+  h('p', {}, card, esc(p.note));
+  const tiles = h('div', {class: 'tiles'}, card);
+  tiles.innerHTML = `<div class="tile"><b>${f2(p.theme)}</b><span>主题项（讨论什么）</span></div><div class="tile"><b>${f2(p.rel)}</b><span>关系项（怎么关联）</span></div>`
+    + `<div class="tile key"><b>${p.strength == null ? '不可比' : f2(p.strength)}</b><span>结构强度</span></div><div class="tile"><b>${f2(p.shared)}</b><span>共同主题的分量</span></div>`;
+  const ax = axes([p.a, p.b]);
+  const legend = h('div', {class: 'legend'}, card, '<span>主题：</span>');
+  const graphs = [p.a, p.b].map(rid => mountGraph(h('div', {class: 'gblock'}, card), D.graphs[rid], {color: 'theme', legend: false, onPick: () => clearMarks()}));
+  const mxRow = h('div', {class: 'cols mx-pair'}, card);
+  const mxs = [p.a, p.b].map(rid => {
+    const col = h('div', {}, mxRow), g = D.graphs[rid];
+    h('div', {class: 'sub'}, col, `${esc(g.broker)} · ${g.date.slice(4, 6)}-${g.date.slice(6)} 的逻辑流分布`);
+    return mountMatrix(h('div', {}, col), rid, ax.rows, ax.cols, (r, c) => { unchip(); graphs.forEach(x => x.pickCell(r, c)); mxs.forEach(m => m.mark(r, c)); });
+  });
+  const chipEls = ax.rows.map(t => {
+    const b = h('button', {type: 'button'}, legend, `<i style="background:${THEME_COLOR[D.graphs[p.a].company][t]}"></i>${esc(t)}`);
+    b.addEventListener('click', () => { unchip(); b.classList.add('on'); graphs.forEach(x => x.pickGroup(t)); mxs.forEach(m => m.mark()); });
+    return b;
+  });
+  h('span', {}, legend, `<i style="background:var(--acc)"></i>会计科目（${D.cash} / ${D.mult}）`);
+  if ([p.a, p.b].some(rid => D.graphs[rid].edges.some(e => e.origin === 'logic'))) h('span', {}, legend, '<i class="ln dash"></i>逻辑补全边');
+  function unchip() { chipEls.forEach(b => b.classList.remove('on')); }
+  function clearMarks() { unchip(); mxs.forEach(m => m.mark()); }
+});
+$('all-pairs').innerHTML = '<thead><tr><th>公司</th><th>研报对</th><th class="n">总分歧</th><th class="n">主题项</th><th class="n">关系项</th><th class="n">共同主题分量</th><th class="n">结构强度</th><th>结构分歧主要来自</th></tr></thead><tbody>'
+  + D.allPairs.map(p => `<tr><td>${esc(p.company)}</td><td>${esc(p.a)} – ${esc(p.b)}</td><td class="n">${f2(p.total)}</td><td class="n">${f2(p.theme)}</td><td class="n">${f2(p.rel)}</td><td class="n">${f2(p.shared)}</td><td class="n">${p.strength == null ? '不可比' : f2(p.strength)}</td><td>${p.top.map(esc).join('、') || '—'}</td></tr>`).join('')
+  + '</tbody>';
+</script>
+</body>
+</html>

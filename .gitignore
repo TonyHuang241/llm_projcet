@@ -1,7 +1,7 @@
-# 两条研究线各自的数据、结果和文献（体积大，不入 git）
-*/data/
-*/output/
-*/literature/
+# 数据、结果和文献 PDF（体积大，不入 git）；literature/ 下的文献梳理和笔记入 git
+/data/
+/output/
+/literature/**/*.pdf
 
 # 敏感信息与缓存
 .env
