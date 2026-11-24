@@ -1,8 +1,6 @@
 # 数据、结果和文献 PDF（体积大，不入 git）；literature/ 下的文献梳理和笔记入 git
 /data/
 /output/
-/output_sample/
-/output_dag/
 /literature/**/*.pdf
 
 # 敏感信息、本机配置与缓存

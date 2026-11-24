@@ -1,0 +1,170 @@
+<!doctype html>
+<!--
+跨研报概念统一的核对页面（静态文件，由 src/graph/unify.py 原样复制到输出目录最外层的 概念统一.html，双击即可打开）。
+页面本身不含数据：打开时用 <script> 读取 data/unify.js（dagUnify(...)），列出大模型合并的每一组名称：统一名称、组内各原名
+出现在几篇、哪些研报，原名的定义和合并理由，以及复核时剔除的名称和理由；“复核取消的组”列出第一步提出、复核后剩不到
+两个名称而保持原样的组。可按名称、公司筛选，用来检查有没有把不同的东西合到一起。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>概念名称统一</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1f2328; --muted: #656d76; --line: #d8dee4; --accent: #2f6feb;
+  --chip: #eef1f4; --keep: #ddf4ff; --keep-ink: #0550ae; --up: #1a7f37;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --panel: #161b22; --ink: #e6edf3; --muted: #8d96a0; --line: #30363d; --accent: #4493f8;
+    --chip: #21262d; --keep: #0c2d4a; --keep-ink: #79c0ff; --up: #3fb950;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.55 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--ink); }
+header { padding: 14px 20px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+h1 { font-size: 18px; margin: 0 0 2px; }
+.sub { color: var(--muted); font-size: 12px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin-top: 12px; }
+.tile { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+.tile .k { color: var(--muted); font-size: 12px; }
+.tile .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile .v small { font-size: 12px; font-weight: 400; color: var(--muted); }
+.tile .v .arrow { color: var(--muted); font-weight: 400; margin: 0 4px; }
+.tile .v .after { color: var(--up); }
+.note { color: var(--muted); font-size: 12px; margin-top: 10px; max-width: 980px; }
+#tools { position: sticky; top: 0; z-index: 2; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  padding: 8px 20px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+#tools input, #tools select { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink); }
+#tools input { width: 240px; max-width: 100%; }
+main { padding: 12px 20px 40px; max-width: 1100px; }
+.group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; }
+.ghead { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.gname { font-weight: 600; font-size: 15px; }
+.gmeta { color: var(--muted); font-size: 12px; }
+.reason { color: var(--muted); font-size: 12px; margin: 2px 0 6px; }
+.reason::before { content: "理由："; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+td { padding: 4px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+td.n { width: 56px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.name { width: 220px; }
+.badge { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--keep);
+  color: var(--keep-ink); margin-left: 6px; white-space: nowrap; }
+.def { color: var(--muted); }
+details { margin-top: 2px; } summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.reps { color: var(--muted); font-size: 12px; }
+.dropped { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.dropped b { font-weight: 600; color: var(--ink); }
+.dropped span { white-space: nowrap; }
+.empty { color: var(--muted); padding: 20px 0; }
+mark { background: #fff3a3; color: inherit; border-radius: 2px; }
+@media (prefers-color-scheme: dark) { mark { background: #5a4a00; } }
+@media (max-width: 640px) {
+  header, #tools, main { padding-left: 16px; padding-right: 16px; }
+  td.name { width: auto; } .def { display: block; }
+  table, tbody, tr, td { display: block; } td { border-top: none; padding: 2px 0; } tr { border-top: 1px solid var(--line); padding: 4px 0; }
+  td.n { text-align: left; width: auto; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>概念名称统一</h1>
+  <div class="sub" id="sub">读取 data/unify.js …</div>
+  <div class="tiles" id="tiles"></div>
+  <div class="note">只合并大模型判断为完全相同的名称（同一个量的全称、简称、英文缩写，语序或近义字眼不同），范围、口径、主体、指标不同的不合并。
+    候选组按名称字面相似和共用别名分出，组和组之间不再合并。“同公司共有”是在同一家公司 2 篇以上研报里都出现的进图概念或边。</div>
+</header>
+<div id="tools">
+  <select id="view"><option value="groups">合并的组</option><option value="rejected">复核取消的组</option></select>
+  <input id="q" type="search" placeholder="筛选名称、原名、公司">
+  <select id="co"><option value="">全部公司</option></select>
+  <select id="sort"><option value="reports">按涉及研报数</option><option value="size">按组内名称数</option><option value="name">按统一名称</option></select>
+  <span id="shown"></span>
+</div>
+<main id="list"><div class="empty">没有数据：先运行 python run.py unify</div></main>
+<script>
+let DATA = null;
+function dagUnify(d) { DATA = d; }
+</script>
+<script src="data/unify.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const pct = (a, b) => b ? (100 * a / b).toFixed(1) + '%' : '—';
+
+function tiles(s) {
+  const t = (k, v) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  const ba = (a, b) => `${a}<span class="arrow">→</span><span class="after">${b}</span>`;
+  $('tiles').innerHTML = [
+    t('不同名称', ba(s.n_terms, s.n_terms_after)),
+    t('合并组', `${s.n_groups} <small>组，涉及 ${s.n_merged_terms} 个名称</small>`),
+    t('复核', `${s.n_dropped} <small>个名称被剔除，${s.n_rejected} 组取消（共提出 ${s.n_proposed} 组）</small>`),
+    t('改了名的概念', `${s.n_changed} <small>/ ${s.n_concepts}（${pct(s.n_changed, s.n_concepts)}）</small>`),
+    t('改了名的进图概念', `${s.n_changed_dag} <small>/ ${s.n_dag_concepts}（${pct(s.n_changed_dag, s.n_dag_concepts)}）</small>`),
+    t('同公司共有的进图概念', ba(s.shared_concepts_before, s.shared_concepts_after)),
+    t('同公司共有的边', ba(s.shared_edges_before, s.shared_edges_after)),
+    t('候选组', `${s.n_blocks} <small>组（${s.n_blocked_terms} 个名称）${s.n_failed_blocks + s.n_failed_verify ? '，调用失败 ' + (s.n_failed_blocks + s.n_failed_verify) + ' 组' : ''}</small>`),
+    t('同篇合并 / 变成自环的边', `${s.n_collide} <small>处</small> / ${s.n_loops} <small>条</small>`),
+  ].join('');
+}
+
+function hl(text, q) {
+  const s = esc(text);
+  if (!q) return s;
+  const i = String(text).toLowerCase().indexOf(q);
+  if (i < 0) return s;
+  return esc(text.slice(0, i)) + '<mark>' + esc(text.slice(i, i + q.length)) + '</mark>' + esc(text.slice(i + q.length));
+}
+
+const droppedHtml = (ds, q) => ds.length ? `<div class="dropped">复核剔除：${ds.map(d =>
+  `<span><b>${hl(d.name, q)}</b>（${d.n} 篇${d.reason ? '，' + esc(d.reason) : ''}）</span>`).join('、')}</div>` : '';
+
+function renderRejected(q) {
+  const gs = (DATA.rejected || []).filter(g => !q || g.name.toLowerCase().includes(q) ||
+    g.dropped.some(d => d.name.toLowerCase().includes(q)));
+  $('shown').textContent = `显示 ${gs.length} / ${(DATA.rejected || []).length} 组（第一步提出合并、复核后剩不到两个名称，保持原样）`;
+  $('list').innerHTML = gs.map(g => `<div class="group">
+    <div class="ghead"><span class="gname">${hl(g.name, q)}</span><span class="gmeta">${g.company ? esc(g.company) + " · " : ""}第一步选的统一名称，${g.keep.n} 篇</span></div>
+    ${g.reason ? `<div class="reason">${esc(g.reason)}</div>` : ''}${droppedHtml(g.dropped, q)}</div>`).join('') ||
+    '<div class="empty">没有符合条件的组</div>';
+}
+
+function render() {
+  const q = $('q').value.trim().toLowerCase(), co = $('co').value, sort = $('sort').value;
+  $('co').disabled = $('sort').disabled = $('view').value === 'rejected';
+  if ($('view').value === 'rejected') return renderRejected(q);
+  let gs = DATA.groups.filter(g => (!co || g.companies.includes(co)) &&
+    (!q || g.name.toLowerCase().includes(q) || g.companies.some(c => c.toLowerCase().includes(q)) ||
+     g.members.some(m => m.name.toLowerCase().includes(q))));
+  const key = {reports: g => -g.n_reports, size: g => -g.members.length, name: g => 0}[sort];
+  gs = gs.slice().sort((a, b) => (key(a) - key(b)) || a.name.localeCompare(b.name, 'zh'));
+  $('shown').textContent = `显示 ${gs.length} / ${DATA.groups.length} 组`;
+  if (!gs.length) { $('list').innerHTML = '<div class="empty">没有符合条件的组</div>'; return; }
+  $('list').innerHTML = gs.map(g => `<div class="group">
+    <div class="ghead"><span class="gname">${hl(g.name, q)}</span>
+      <span class="gmeta">${g.members.length} 个名称 · ${g.n_reports} 篇研报 · ${esc(g.companies.join('、'))}</span></div>
+    ${g.reason ? `<div class="reason">${esc(g.reason)}</div>` : ''}
+    <table>${g.members.map(m => `<tr>
+      <td class="name">${hl(m.name, q)}${m.name === g.name ? '<span class="badge">统一名称</span>' : ''}</td>
+      <td class="n">${m.n} 篇</td>
+      <td><span class="def">${esc(m.definition)}</span>
+        <details><summary>出现在哪些研报</summary><div class="reps">${m.reports.map(esc).join('<br>')}${m.n > m.reports.length ? '<br>……' : ''}</div></details></td>
+    </tr>`).join('')}</table>${droppedHtml(g.dropped || [], q)}</div>`).join('');
+}
+
+if (DATA) {
+  const s = DATA.stats;
+  $('sub').textContent = `${s.n_reports} 篇研报、${s.n_companies} 家公司，概念 ${s.n_concepts} 个 · 模型 ${DATA.model} · 生成于 ${DATA.generated}`;
+  tiles(s);
+  const cos = [...new Set(DATA.groups.flatMap(g => g.companies))].sort((a, b) => a.localeCompare(b, 'zh'));
+  $('co').insertAdjacentHTML('beforeend', cos.map(c => `<option>${esc(c)}</option>`).join(''));
+  ['view', 'q', 'co', 'sort'].forEach(id => ['input', 'change'].forEach(ev => $(id).addEventListener(ev, render)));
+  render();
+}
+</script>
+</body>
+</html>

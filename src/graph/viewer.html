@@ -1,0 +1,446 @@
+<!doctype html>
+<!--
+研报概念有向无环图查看页面（静态文件，由 src/graph/extract.py 原样复制到输出目录最外层的 概念DAG.html，双击即可打开）。
+页面本身不含研报数据：打开时只读目录 data/graphs/index.js，选中一篇研报时才用 <script> 读取它的数据文件
+（data/graphs/xx/….js）并绘图，所以研报再多，页面也不会变大。
+
+图从左到右（或从上到下）排：结果总在原因的右边，每个概念紧挨在它最近的结果左侧一列，箭头由原因指向结果（A 影响 B）。
+  边的颜色表示方向：红色正向、绿色负向（A 股习惯），灰色是原文没说明方向，黄色是几处引文方向矛盾；边越粗，原文引文越多。
+  节点底色表示概念类型（指标、事件、状态）；粗边框是终点（没有出边），点线边框是没有连上任何边的孤立概念（默认不显示）。
+点击节点突出它的全部上游和下游，右侧显示定义、别名和直接相连的边；点击边显示全部原文引文和所在段落（引文高亮）。
+运行过 python run.py unify 时还会读 data/unify.js：工具栏多出“统一名称”开关（按跨研报统一后的名称标注节点），
+节点详情里显示它统一成了什么、同组还有哪些原名。
+需要联网加载 vis-network（jsdelivr CDN）。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>研报概念 DAG</title>
+<script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1f2328; --muted: #656d76; --line: #d8dee4; --accent: #2f6feb;
+  --pos: #cf222e; --neg: #1a7f37; --mix: #bf8700; --unk: #8c959f;
+  --pos-bg: #ffebe9; --neg-bg: #dafbe1; --mix-bg: #fff8c5; --unk-bg: #eef1f4;
+  --k-ind: #ddf4ff; --k-evt: #fff1e5; --k-sta: #fbefff; --k-ind-b: #54aeff; --k-evt-b: #fb8f44; --k-sta-b: #c297ff;
+  --mark: #fff3a3;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --panel: #161b22; --ink: #e6edf3; --muted: #8d96a0; --line: #30363d; --accent: #4493f8;
+    --pos: #ff7b72; --neg: #3fb950; --mix: #d29922; --unk: #6e7681;
+    --pos-bg: #4a1d1d; --neg-bg: #12361f; --mix-bg: #3d2f05; --unk-bg: #21262d;
+    --k-ind: #0c2d4a; --k-evt: #3d2410; --k-sta: #2c1a45; --k-ind-b: #388bfd; --k-evt-b: #db6d28; --k-sta-b: #a371f7;
+    --mark: #5a4a00;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--ink); height: 100vh; display: flex; flex-direction: column; }
+header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line);
+  background: var(--panel); flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0; }
+#count { color: var(--muted); font-size: 12px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-left: auto; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { display: inline-block; width: 22px; height: 0; border-top: 2px solid; }
+.legend b { display: inline-block; width: 14px; height: 12px; border-radius: 3px; border: 1px solid; }
+main { flex: 1; display: flex; min-height: 0; }
+#side { width: 260px; border-right: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 8px; }
+#side input { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+  color: var(--ink); font: inherit; margin-bottom: 6px; }
+.company { font-weight: 600; margin: 10px 4px 4px; color: var(--muted); font-size: 12px; }
+.rep { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.rep:hover { background: var(--bg); }
+.rep.on { background: var(--accent); color: #fff; }
+.rep small { display: block; opacity: .75; font-size: 11px; }
+.msg { padding: 16px; color: var(--muted); }
+#center { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#meta { padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 13px; }
+#meta .t { font-weight: 600; font-size: 14px; }
+#meta .s { color: var(--muted); }
+#tools { display: flex; gap: 14px; align-items: center; padding: 6px 14px; font-size: 12px; color: var(--muted);
+  border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+#tools label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+#tools select, #tools button { font: inherit; background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+#net { flex: 1; min-height: 0; }
+#detail { width: 360px; border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 12px 14px;
+  font-size: 13px; }
+#detail h3 { margin: 0 0 6px; font-size: 15px; }
+#detail .sec { margin-top: 14px; font-weight: 600; color: var(--muted); font-size: 12px; }
+#detail ul { padding-left: 18px; margin: 6px 0; } #detail li { margin: 4px 0; }
+#detail .ev { color: var(--muted); font-size: 12px; }
+#detail .link { color: var(--accent); cursor: pointer; }
+#detail .link:hover { text-decoration: underline; }
+#detail details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-top: 14px; font-weight: 600; }
+.tag { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 12px; margin-right: 4px; white-space: nowrap; }
+.tag.正向 { background: var(--pos-bg); color: var(--pos); } .tag.负向 { background: var(--neg-bg); color: var(--neg); }
+.tag.矛盾 { background: var(--mix-bg); color: var(--mix); } .tag.未说明, .tag.grey { background: var(--unk-bg); color: var(--muted); }
+.quote { border-left: 3px solid var(--line); padding: 4px 8px; margin: 6px 0; background: var(--bg); border-radius: 0 4px 4px 0; }
+.para { font-size: 12px; color: var(--muted); margin: 4px 0 10px; line-height: 1.6; }
+.para b { color: var(--ink); font-weight: 600; }
+mark { background: var(--mark); color: var(--ink); padding: 0 1px; border-radius: 2px; }
+.grid { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 6px 0; }
+.grid span:nth-child(odd) { color: var(--muted); }
+@media (max-width: 900px) {
+  body { height: auto; } main { flex-direction: column; }
+  #side, #detail { width: auto; max-height: 40vh; border: none; border-bottom: 1px solid var(--line); }
+  #net { min-height: 70vh; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>研报概念 DAG</h1>
+  <span id="count"></span>
+  <div class="legend">
+    <span><i style="border-color:var(--pos)"></i>正向</span>
+    <span><i style="border-color:var(--neg)"></i>负向</span>
+    <span><i style="border-color:var(--unk)"></i>未说明方向</span>
+    <span><i style="border-color:var(--mix)"></i>方向矛盾</span>
+    <span><b style="background:var(--k-ind);border-color:var(--k-ind-b)"></b>指标</span>
+    <span><b style="background:var(--k-evt);border-color:var(--k-evt-b)"></b>事件</span>
+    <span><b style="background:var(--k-sta);border-color:var(--k-sta-b)"></b>状态</span>
+    <span><b style="border-width:3px;border-color:var(--ink)"></b>终点</span>
+  </div>
+</header>
+<main>
+  <nav id="side"><input id="q" placeholder="筛选：公司、代码、券商、日期"><div id="list"></div></nav>
+  <section id="center">
+    <div id="meta"><span class="s">在左侧选一篇研报。</span></div>
+    <div id="tools">
+      <label>方向 <select id="dir"><option value="LR">原因在左</option><option value="UD">原因在上</option></select></label>
+      <label><input type="checkbox" id="show-iso">显示孤立概念</label>
+      <label><input type="checkbox" id="show-sup">边上标引文数</label>
+      <label id="uni-wrap" hidden title="按 python run.py unify 跨研报统一后的名称显示（概念统一.html 里可核对合并了哪些名称）"><input type="checkbox" id="show-uni">统一名称</label>
+      <button id="fit">适应窗口</button>
+      <span>点击节点突出上下游，点击边看原文，点空白处恢复；滚轮缩放，拖动平移</span>
+    </div>
+    <div id="net"></div>
+  </section>
+  <aside id="detail"><div class="ev">点击图中的节点或边查看详情。</div></aside>
+</main>
+<script>
+// 数据文件都是“函数名(JSON);”的形式，用 <script> 读取（直接双击打开页面时浏览器不允许 fetch 本地文件）
+const GRAPH_DIR = 'data/graphs/';
+let INDEX = null, UNIFY = null;
+const LOADED = new Map();  // rid -> 已读取的研报数据
+window.dagIndex = d => { INDEX = d; };
+window.dagUnify = d => { UNIFY = d; };  // 跨研报概念统一的结果（没运行过 python run.py unify 时没有这个文件）
+window.dagReport = d => { LOADED.set(d.rid, d); };
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.onload = () => { el.remove(); resolve(); };
+    el.onerror = () => { el.remove(); reject(new Error('读取失败：' + src)); };
+    document.head.appendChild(el);
+  });
+}
+</script>
+<script src="data/graphs/index.js"></script>
+<script src="data/unify.js"></script>
+<script>
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const $ = id => document.getElementById(id);
+const KIND = {'指标': ['--k-ind', '--k-ind-b'], '事件': ['--k-evt', '--k-evt-b'], '状态': ['--k-sta', '--k-sta-b']};
+const DIR_COLOR = {'正向': '--pos', '负向': '--neg', '未说明': '--unk', '矛盾': '--mix'};
+let cur = null, curEntry = null, network = null, nodesDS = null, edgesDS = null, base = null;
+
+const reports = INDEX ? INDEX.reports : [];
+reports.forEach(r => { r.hay = [r.company, r.stock_code, r.broker, r.date, r.title, r.rid].join(' ').toLowerCase(); });
+$('count').textContent = INDEX ? `${reports.length} 篇研报 · 模型 ${INDEX.model} · 生成于 ${INDEX.generated}` : '';
+const fmtDate = d => d && d.length === 8 ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}` : (d || '');
+const UNI_GROUP = new Map(UNIFY ? UNIFY.groups.map(g => [g.name, g]) : []);  // 统一名称 -> 合并组
+if (UNIFY) $('uni-wrap').hidden = false;
+const uniName = id => (UNIFY && cur && (UNIFY.map[cur.rid] || {})[id]) || id;  // 这一篇里的概念 -> 统一名称
+const label = id => $('show-uni').checked ? uniName(id) : id;
+
+function renderList() {
+  const words = $('q').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const hits = reports.filter(r => words.every(w => r.hay.includes(w)));
+  const box = $('list');
+  if (!INDEX) { box.innerHTML = '<p class="msg">没有找到 data/graphs/index.js：请先运行 python run.py graph。</p>'; return; }
+  let html = '', last = null;
+  for (const r of hits) {
+    if (r.stock_code !== last) { html += `<div class="company">${esc(r.company)} ${esc(r.stock_code)}</div>`; last = r.stock_code; }
+    html += `<div class="rep${curEntry && curEntry.rid === r.rid ? ' on' : ''}" data-rid="${esc(r.rid)}">${esc(fmtDate(r.date))} · ${esc(r.broker)}` +
+      `<small>概念 ${r.n_concepts} · 进图 ${r.n_nodes} · 边 ${r.n_edges}</small></div>`;
+  }
+  box.innerHTML = html || '<p class="msg">没有匹配的研报。</p>';
+}
+$('list').addEventListener('click', e => {
+  const el = e.target.closest('.rep');
+  if (el) open(reports.find(r => r.rid === el.dataset.rid));
+});
+$('q').addEventListener('input', renderList);
+
+async function open(entry) {
+  curEntry = entry;
+  renderList();
+  if (!LOADED.has(entry.rid)) {
+    $('meta').innerHTML = '<span class="s">读取中…</span>';
+    try { await loadScript(GRAPH_DIR + entry.file); } catch (err) { $('meta').innerHTML = `<span class="s">${esc(err.message)}</span>`; return; }
+  }
+  if (curEntry !== entry) return;
+  cur = LOADED.get(entry.rid);
+  cur.byId = new Map(cur.nodes.map(n => [n.id, n]));
+  cur.paraById = new Map(cur.paras.map(p => [p.para_id, p.text]));
+  const m = cur.meta, s = cur.stats;
+  $('meta').innerHTML = `<div class="t">${esc(m.company)} ${esc(m.stock_code)} · ${esc(fmtDate(m.date))} · ${esc(m.broker)}` +
+    (m.title ? ` · ${esc(m.title)}` : '') + '</div>' +
+    `<div class="s">${cur.paras.length} 段 ${s.n_chars} 字，合并成 ${s.n_chunks} 块 · 概念 ${s.n_concepts} 个，进图 ${s.n_nodes} 个、孤立 ${s.n_isolated} 个 · ` +
+    `边 ${s.n_edges} 条（成环删掉 ${s.n_removed} 条）· 起点 ${s.n_sources} 个、终点 ${s.n_sinks} 个、子图 ${s.n_components} 个 · 最长链 ${s.longest} 步</div>`;
+  draw();
+  showReport();
+}
+
+function draw() {
+  if (!cur || typeof vis === 'undefined') return;
+  const showIso = $('show-iso').checked, showSup = $('show-sup').checked, dir = $('dir').value;
+  const outDeg = new Map();
+  cur.edges.forEach(e => outDeg.set(e.cause, (outDeg.get(e.cause) || 0) + 1));
+  const ink = css('--ink'), muted = css('--muted');
+  // 列号：数据里是从起点算起的最长路径步数；画图时把非终点的概念尽量往右挪，紧挨着它最近的结果（按列号从大到小处理），免得起点都挤在最左边、拉出很长的边
+  const col = new Map(cur.nodes.filter(n => n.in_dag).map(n => [n.id, n.level]));
+  const succ = new Map();
+  cur.edges.forEach(e => { if (!succ.has(e.cause)) succ.set(e.cause, []); succ.get(e.cause).push(e.effect); });
+  [...col.keys()].sort((a, b) => col.get(b) - col.get(a)).forEach(id => {
+    if (succ.has(id)) col.set(id, Math.min(...succ.get(id).map(s => col.get(s))) - 1);
+  });
+  base = {nodes: new Map(), edges: new Map()};
+  const nodes = cur.nodes.filter(n => n.in_dag || showIso).map(n => {
+    const [bg, bd] = (KIND[n.kind] || KIND['指标']).map(css), sink = n.in_dag && !outDeg.get(n.id);
+    const node = {id: n.id, label: label(n.id), level: n.in_dag ? col.get(n.id) : Math.min(0, ...col.values()),
+      color: {background: bg, border: sink ? ink : bd, highlight: {background: bg, border: css('--accent')}},
+      borderWidth: sink ? 3 : 1.5, shapeProperties: {borderDashes: n.in_dag ? false : [3, 3]},
+      font: {color: n.in_dag ? ink : muted}, title: `${n.kind}：${n.definition || ''}`};
+    base.nodes.set(n.id, node);
+    return node;
+  });
+  const edges = cur.edges.map((e, i) => {
+    const c = css(DIR_COLOR[e.direction] || '--unk');
+    const edge = {id: i, from: e.cause, to: e.effect, width: 1.2 + Math.min(e.support - 1, 4) * 0.9,
+      color: {color: c, highlight: c, hover: c}, label: showSup && e.support > 1 ? String(e.support) : undefined,
+      font: {color: muted, size: 11, strokeWidth: 0, align: 'top'}, title: e.evidence.map(x => x.quote).join('\n')};
+    base.edges.set(i, edge);
+    return edge;
+  });
+  const lr = dir === 'LR';
+  const pos = layout(nodes.map(n => n.id), col, lr);
+  nodes.forEach(n => { Object.assign(n, pos.get(n.id)); delete n.level; });
+  nodesDS = new vis.DataSet(nodes);
+  edgesDS = new vis.DataSet(edges);
+  const options = {
+    layout: {hierarchical: {enabled: false}},
+    physics: false,
+    interaction: {hover: true, tooltipDelay: 300},
+    nodes: {shape: 'box', margin: 8, widthConstraint: {maximum: 150},
+      font: {size: 14, face: '-apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif'}},
+    edges: {arrows: {to: {enabled: true, scaleFactor: 0.6}},
+      smooth: {type: 'cubicBezier', forceDirection: lr ? 'horizontal' : 'vertical', roundness: 0.45}},
+  };
+  if (network) network.destroy();
+  if (!nodes.length) { $('net').innerHTML = '<p class="msg">这篇研报没有抽出任何边。</p>'; network = null; return; }
+  network = new vis.Network($('net'), {nodes: nodesDS, edges: edgesDS}, options);
+  network.once('afterDrawing', () => network.fit());
+  network.on('click', p => {
+    if (p.nodes.length) { focus(p.nodes[0]); showNode(p.nodes[0]); }
+    else if (p.edges.length) { focus(null); showEdge(p.edges[0]); }
+    else { focus(null); showReport(); }
+  });
+}
+
+// 分层布局（不用 vis 自带的：它遇到多个子图时把子图排成一长串、间距很大）。列号 col 已定；每个子图（弱连通分量）内
+// 各列的上下次序用重心法来回调几遍（按相连概念的平均位置排），减少交叉；子图按高度从大到小一行一行地排，行宽按窗口比例定；
+// 孤立概念（勾选显示时）排成一块放在最后。返回 {id: {x, y}}。
+function layout(ids, col, lr) {
+  const LG = lr ? 210 : 115, OG = lr ? 56 : 175, GAP = lr ? 70 : 90;  // 列间距、列内间距、子图之间的空隙
+  const nb = new Map(ids.map(id => [id, []]));
+  cur.edges.forEach(e => { if (nb.has(e.cause) && nb.has(e.effect)) { nb.get(e.cause).push(e.effect); nb.get(e.effect).push(e.cause); } });
+  const order = new Map(cur.nodes.map((n, i) => [n.id, i])), seen = new Set(), blocks = [], iso = [];
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    if (!col.has(id)) { iso.push(id); seen.add(id); continue; }
+    const comp = [], stack = [id];
+    seen.add(id);
+    while (stack.length) {
+      const x = stack.pop();
+      comp.push(x);
+      nb.get(x).forEach(y => { if (!seen.has(y)) { seen.add(y); stack.push(y); } });
+    }
+    const c0 = Math.min(...comp.map(x => col.get(x))), cols = [];
+    comp.sort((a, b) => order.get(a) - order.get(b)).forEach(x => (cols[col.get(x) - c0] ||= []).push(x));
+    const o = new Map();
+    const place = () => cols.forEach(c => (c || []).forEach((x, i) => o.set(x, i - (c.length - 1) / 2)));
+    place();
+    for (let it = 0; it < 6; it++) {  // 重心法：交替从左往右、从右往左，按相邻概念的平均位置重排每一列
+      const seq = it % 2 ? [...cols.keys()].reverse() : [...cols.keys()];
+      for (const k of seq) {
+        const c = cols[k];
+        if (!c) continue;
+        const bary = x => { const ys = nb.get(x).map(y => o.get(y)); return ys.length ? ys.reduce((s, v) => s + v, 0) / ys.length : o.get(x); };
+        const b = new Map(c.map(x => [x, bary(x)]));
+        c.sort((p, q) => b.get(p) - b.get(q));
+        c.forEach((x, i) => o.set(x, i - (c.length - 1) / 2));
+      }
+    }
+    const span = Math.max(...cols.map(c => (c || []).length));
+    blocks.push({nodes: comp.map(x => [x, col.get(x) - c0, o.get(x) + (span - 1) / 2]), L: cols.length, O: span});
+  }
+  if (iso.length) {  // 孤立概念：排成大致方形的一块
+    const per = Math.ceil(Math.sqrt(iso.length * (lr ? OG / LG : LG / OG) * 1.5));
+    blocks.push({nodes: iso.map((x, i) => [x, Math.floor(i / per), i % per]), L: Math.ceil(iso.length / per), O: Math.min(per, iso.length)});
+  }
+  // 换成画布尺寸：横向排时列沿 x、列内沿 y；纵向排时反过来
+  blocks.forEach(b => { b.w = lr ? b.L * LG : b.O * OG; b.h = lr ? b.O * OG : b.L * LG; });
+  const box = $('net').getBoundingClientRect(), aspect = Math.max(box.width, 300) / Math.max(box.height, 300);
+  const area = blocks.reduce((s, b) => s + (b.w + GAP) * (b.h + GAP), 0);
+  const rowW = Math.max(...blocks.map(b => b.w), Math.sqrt(area * aspect));
+  const main = blocks.filter((b, i) => !(iso.length && i === blocks.length - 1)).sort((a, b) => b.h - a.h || b.w - a.w);
+  const pos = new Map();
+  let x = 0, y = 0, rowH = 0;
+  for (const b of iso.length ? [...main, blocks[blocks.length - 1]] : main) {
+    if (x > 0 && (x + b.w > rowW || (iso.length && b === blocks[blocks.length - 1]))) { x = 0; y += rowH + GAP * 1.5; rowH = 0; }
+    b.nodes.forEach(([id, L, O]) => pos.set(id, lr ? {x: x + L * LG, y: y + O * OG} : {x: x + O * OG, y: y + L * LG}));
+    x += b.w + GAP;
+    rowH = Math.max(rowH, b.h);
+  }
+  return pos;
+}
+
+// 突出某个概念的全部上游和下游；id 为 null 时恢复
+function focus(id) {
+  if (!nodesDS) return;
+  if (id === null) {
+    nodesDS.update([...base.nodes.values()].map(n => ({id: n.id, color: n.color, font: n.font, opacity: 1})));
+    edgesDS.update([...base.edges.values()].map(e => ({id: e.id, color: e.color, hidden: false, width: e.width})));
+    return;
+  }
+  const walk = (start, next) => {
+    const seen = new Set([start]), stack = [start];
+    while (stack.length) {
+      const x = stack.pop();
+      for (const e of cur.edges) {
+        const [a, b] = next(e);
+        if (a === x && !seen.has(b)) { seen.add(b); stack.push(b); }
+      }
+    }
+    return seen;
+  };
+  const up = walk(id, e => [e.effect, e.cause]), down = walk(id, e => [e.cause, e.effect]);
+  const keep = new Set([...up, ...down]), faint = css('--line');
+  nodesDS.update([...base.nodes.values()].map(n => keep.has(n.id) ? {id: n.id, color: n.color, font: n.font, opacity: 1}
+    : {id: n.id, opacity: 0.2}));
+  edgesDS.update(cur.edges.map((e, i) => {
+    const on = (up.has(e.cause) && up.has(e.effect)) || (down.has(e.cause) && down.has(e.effect));
+    return on ? {id: i, color: base.edges.get(i).color, width: base.edges.get(i).width}
+      : {id: i, color: {color: faint, highlight: faint, hover: faint}, width: 1};
+  }));
+}
+
+const tag = d => `<span class="tag ${esc(d)}">${esc(d)}</span>`;
+const nodeLink = id => `<span class="link" data-node="${esc(id)}">${esc(id)}</span>`;
+
+// 在段落里标出引文（引文可以用“……”连接几处原文）
+function highlight(text, quote) {
+  let html = esc(text);
+  for (const part of String(quote).split(/…+|\.{3,}/).map(s => s.trim()).filter(s => s.length >= 2)) {
+    const p = esc(part);
+    const i = html.indexOf(p);
+    if (i >= 0) html = html.slice(0, i) + '<mark>' + p + '</mark>' + html.slice(i + p.length);
+  }
+  return html;
+}
+
+function evidenceHtml(list, withPara) {
+  return list.map(x => `<div class="quote">${tag(x.direction)}“${esc(x.quote)}” <span class="ev">[段 ${x.para_id}]</span></div>` +
+    (withPara && cur.paraById.has(x.para_id) ? `<div class="para"><b>[${x.para_id}]</b> ${highlight(cur.paraById.get(x.para_id), x.quote)}</div>` : '')).join('');
+}
+
+function showReport() {
+  const s = cur.stats, inDeg = new Map(), outDeg = new Map();
+  cur.edges.forEach(e => { outDeg.set(e.cause, 1); inDeg.set(e.effect, 1); });
+  const dag = cur.nodes.filter(n => n.in_dag);
+  const sources = dag.filter(n => !inDeg.has(n.id)), sinks = dag.filter(n => !outDeg.has(n.id));
+  const iso = cur.nodes.filter(n => !n.in_dag);
+  const quotes = new Map();
+  cur.edges.forEach(e => e.evidence.forEach(x => { if (!quotes.has(x.para_id)) quotes.set(x.para_id, []); quotes.get(x.para_id).push(x.quote); }));
+  let html = `<h3>本篇概况</h3><div class="grid">` +
+    `<span>概念</span><span>${s.n_concepts} 个（进图 ${s.n_nodes}，孤立 ${s.n_isolated}）</span>` +
+    `<span>边</span><span>${s.n_edges} 条（各块抽出 ${s.n_raw_edges} 条，合并同一对概念后成环删掉 ${s.n_removed} 条）</span>` +
+    `<span>结构</span><span>起点 ${s.n_sources} · 终点 ${s.n_sinks} · 子图 ${s.n_components} · 最长链 ${s.longest} 步</span></div>`;
+  html += `<div class="sec">终点（没有出边）</div><ul>${sinks.map(n => `<li>${nodeLink(n.id)}</li>`).join('') || '<li class="ev">无</li>'}</ul>`;
+  html += `<div class="sec">起点（没有入边）</div><ul>${sources.map(n => `<li>${nodeLink(n.id)}</li>`).join('') || '<li class="ev">无</li>'}</ul>`;
+  if (cur.removed.length) {
+    html += `<div class="sec">因成环删掉的边（环上引文最少、出现最晚的一条）</div><ul>` + cur.removed.map(e =>
+      `<li>${esc(e.cause)} → ${esc(e.effect)} ${tag(e.direction)}<div class="ev">环：${esc(e.cycle.join(' → '))} → ${esc(e.cycle[0])}</div>` +
+      evidenceHtml(e.evidence, false) + '</li>').join('') + '</ul>';
+  }
+  if (iso.length) {
+    html += `<div class="sec">孤立概念（没有连上任何边，${iso.length} 个）</div><div class="ev">` +
+      iso.map(n => esc(n.id)).join('、') + '</div>';
+  }
+  html += `<details><summary>正文（${cur.paras.length} 段，已连成边的引文高亮）</summary>` + cur.paras.map(p => {
+    let h = esc(p.text);
+    for (const q of quotes.get(p.para_id) || []) {
+      for (const part of q.split(/…+|\.{3,}/).map(x => esc(x.trim())).filter(x => x.length >= 2)) {
+        const i = h.indexOf(part);
+        if (i >= 0 && !h.slice(0, i).endsWith('<mark>')) h = h.slice(0, i) + '<mark>' + part + '</mark>' + h.slice(i + part.length);
+      }
+    }
+    return `<div class="para"><b>[${p.para_id}]</b> ${h}</div>`;
+  }).join('') + '</details>';
+  $('detail').innerHTML = html;
+}
+
+function showNode(id) {
+  const n = cur.byId.get(id);
+  const ins = cur.edges.filter(e => e.effect === id), outs = cur.edges.filter(e => e.cause === id);
+  const edgeItem = (e, other) => `<li>${nodeLink(other)} ${tag(e.direction)}<span class="ev">引文 ${e.support} 处</span>` +
+    `<div class="ev">“${esc(e.evidence[0].quote)}”</div></li>`;
+  let html = `<h3>${esc(n.id)}</h3><span class="tag grey">${esc(n.kind)}</span>` +
+    (n.in_dag ? `<span class="tag grey">距起点最多 ${n.level} 步</span>` : '<span class="tag grey">孤立</span>') +
+    `<p>${esc(n.definition || '')}</p>`;
+  if (n.aliases.length) html += `<div class="sec">原文叫法</div><div>${n.aliases.map(esc).join('、')}</div>`;
+  const u = uniName(id), g = UNI_GROUP.get(u);
+  if (u !== id || g) {
+    html += `<div class="sec">跨研报统一</div><div>${u !== id ? `统一为 <b>${esc(u)}</b>` : '本名即统一名称'}` +
+      (g ? `；同组 ${g.members.map(m => `${esc(m.name)}（${m.n} 篇）`).join('、')}，共 ${g.n_reports} 篇研报` : '') + '</div>' +
+      (g && g.reason ? `<div class="ev">理由：${esc(g.reason)}</div>` : '');
+  }
+  if (n.para_id != null && cur.paraById.has(n.para_id)) html += `<div class="ev" style="margin-top:6px">首次出现在第 ${n.para_id} 段所在的块</div>`;
+  html += `<div class="sec">直接原因（${ins.length}）</div><ul>${ins.map(e => edgeItem(e, e.cause)).join('') || '<li class="ev">无（起点）</li>'}</ul>`;
+  html += `<div class="sec">直接结果（${outs.length}）</div><ul>${outs.map(e => edgeItem(e, e.effect)).join('') || '<li class="ev">无（终点）</li>'}</ul>`;
+  $('detail').innerHTML = html;
+}
+
+function showEdge(i) {
+  const e = cur.edges[i];
+  $('detail').innerHTML = `<h3>${nodeLink(e.cause)} → ${nodeLink(e.effect)}</h3>${tag(e.direction)}` +
+    `<span class="ev">原文引文 ${e.support} 处</span><div class="sec">引文与所在段落</div>` + evidenceHtml(e.evidence, true);
+}
+
+$('detail').addEventListener('click', ev => {
+  const el = ev.target.closest('[data-node]');
+  if (!el || !network) return;
+  const id = el.dataset.node;
+  if (!nodesDS.get(id)) return;
+  network.selectNodes([id]);
+  network.focus(id, {scale: Math.max(network.getScale(), 0.9), animation: {duration: 300}});
+  focus(id);
+  showNode(id);
+});
+['dir', 'show-iso', 'show-sup', 'show-uni'].forEach(id => $(id).addEventListener('change', () => { draw(); if (cur) showReport(); }));
+$('fit').addEventListener('click', () => network && network.fit({animation: {duration: 300}}));
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (cur) draw(); });
+
+renderList();
+if (typeof vis === 'undefined') $('net').innerHTML = '<p class="msg">vis-network 加载失败，请检查网络连接。</p>';
+else if (reports.length) open(reports[0]);
+</script>
+</body>
+</html>
