@@ -3,7 +3,9 @@
 
 节点对齐分三个粒度：
   概念      全局名称（nodes[].label），只取第 3-5 层。同公司研报之间精确重合很少，只作参照。
-  主题      每家公司调用一次大模型（prompt 的“主题”两节），把这家公司各篇研报的第 3-5 层概念归成主题，是主要的对比粒度。
+  主题      每家公司调用大模型（prompt 的“主题”“主题归入”各两节），把这家公司各篇研报的第 3-5 层概念归成主题，是主要的对比粒度。
+            概念不超过 THEME_SEED 个时一次归完；更多时（一次交给大模型会超时）先用提到篇数最多的 THEME_SEED 个概念定出主题，
+            其余的每批 THEME_BATCH 个归入已有主题，和哪个主题都不相关的概念各自单独成一个主题。
   会计科目  第 2 层，表示框架最后落到哪些财务科目。
 
 matrices.parquet：每篇研报的矩阵，长表（report_id、level、kind、row、col、value、sign），同一家公司内行列名称统一，
@@ -70,6 +72,9 @@ from src.llm_client import load_env, log, set_log_path
 from src.logic.base import ROOT, Ctx, Step, norm_name, parse_json, short, write_parquet
 from src.logic.output import read_graphs
 
+THEME_SEED = 120  # 一家公司的概念多于这个数时，先用提到篇数最多的这么多个定主题
+THEME_BATCH = 60  # 其余的概念每批多少个归入已有主题
+NO_THEME = ('无', '无。', 'None', 'none', 'null', '')  # 归入时表示“和哪个主题都不相关”的写法
 TEXT_EDGES = ('extracted', 'bridged', 'preset')  # edge_set='text' 时保留的边
 LAYERS = (1, 2, 3, 4, 5)
 NAN = float('nan')
@@ -207,34 +212,99 @@ def parse_themes(content, names, lo, hi, strict=True):
     return themes
 
 
-def assign_themes(ctx, companies):
-    """每家公司调用一次大模型归主题。companies 为 {公司键: (公司名, 研报列表)}，
-    返回 {公司键: {'themes': [...], 'of': {概念: 主题}, 'concepts': concept_list 的结果}}。"""
-    step = Step(ctx, 'theme_cache.jsonl', '主题', fields=('themes',))
+def parse_assign(content, names, themes, strict=True):
+    """校验一批概念归入已有主题的结果，返回 {概念: 主题名}，值为 None 表示和哪个主题都不相关。
+    strict=False 时（重试用完）只丢掉不合格的部分，没有合格结果的概念按不相关处理。"""
+    assign = parse_json(content, dict).get('assign')
+    if not isinstance(assign, dict):
+        raise ValueError('需要 assign 对象')
+    index, known = {norm_name(n): n for n in names}, {norm_name(t): t for t in themes}
+    out, errors = {}, []
+    for raw, t in assign.items():
+        c, t = index.get(norm_name(raw)), norm_name(t) if isinstance(t, str) else ''
+        if c is None:
+            errors.append(f'“{norm_name(raw)}”不在待归类的概念清单中：概念名只能从清单中原样照抄')
+        elif t in NO_THEME:
+            out[c] = None
+        elif t in known:
+            out[c] = known[t]
+        else:
+            errors.append(f'“{c}”归入的“{t}”不在主题表中：主题名只能从主题表中原样照抄，都不相关时写“无”')
+    lack = [n for n in names if n not in out]
+    if lack:
+        errors.append(f'assign 中缺少这些概念：{"、".join(lack)}')
+    if errors and strict:
+        raise ValueError('；'.join(errors))
+    return {n: out.get(n) for n in names}
 
-    def work(item):
+
+def assign_themes(ctx, companies):
+    """每家公司调用大模型归主题。companies 为 {公司键: (公司名, 研报列表)}，
+    返回 {公司键: {'themes': [...], 'of': {概念: 主题}, 'concepts': concept_list 的结果}}。
+    概念不超过 THEME_SEED 个时一次归完；更多时先用提到篇数最多的 THEME_SEED 个定主题，其余的分批归入已有主题。"""
+    step = Step(ctx, 'theme_cache.jsonl', '主题', fields=('themes',))
+    more = Step(ctx, 'theme_assign_cache.jsonl', '主题归入', fields=('assign',))
+    line = lambda n, cs: f'{n} ｜ 第{cs[n]["layer"]}层 ｜ {cs[n]["definition"] or "—"} ｜ {cs[n]["n_reports"]} 篇'
+
+    def define(item):
+        """定主题：返回 (概念, 主题, 还没归类的概念)。"""
         key, (company, recs) = item
         concepts = concept_list(recs)
         names = sorted(concepts, key=lambda n: (concepts[n]['layer'], -concepts[n]['n_reports'], n))
         if not names:
-            return concepts, []
-        text = '\n'.join(f'{n} ｜ 第{concepts[n]["layer"]}层 ｜ {concepts[n]["definition"] or "—"} ｜ {concepts[n]["n_reports"]} 篇'
-                         for n in names)
+            return concepts, [], []
         lo, hi = theme_range(len(names))
-        themes = step.ask(step.key(company, text), lambda c: parse_themes(c, names, lo, hi),
-                          lenient=lambda c: parse_themes(c, names, lo, hi, strict=False), extra={'company': company},
-                          company=company, n=len(names), lo=lo, hi=hi, concepts=text)
-        return concepts, themes
+        seed, parts = names, ()
+        if len(names) > THEME_SEED:
+            top = set(sorted(names, key=lambda n: (-concepts[n]['n_reports'], n))[:THEME_SEED])
+            seed = [n for n in names if n in top]
+            hi = min(hi, len(seed) // 2)
+            lo, parts = min(lo, hi), (f'{lo}-{hi}',)  # 主题数按全部概念的个数定，不是这一批的个数，所以记进缓存键
+        text = '\n'.join(line(n, concepts) for n in seed)
+        themes = step.ask(step.key(company, text, *parts), lambda c: parse_themes(c, seed, lo, hi),
+                          lenient=lambda c: parse_themes(c, seed, lo, hi, strict=False), extra={'company': company},
+                          company=company, n=len(seed), lo=lo, hi=hi, concepts=text)
+        return concepts, themes, [n for n in names if n not in set(seed)]
+
+    def place(task):
+        """把一批概念归入已有主题：返回 {概念: 主题名或 None}。"""
+        company, concepts, themes, batch = task
+        table = '\n'.join(f'{t["name"]} ｜ {t["definition"] or "—"}' for t in themes)
+        text = '\n'.join(line(n, concepts) for n in batch)
+        tnames = [t['name'] for t in themes]
+        return more.ask(more.key(company, table, text), lambda c: parse_assign(c, batch, tnames),
+                        lenient=lambda c: parse_assign(c, batch, tnames, strict=False), extra={'company': company},
+                        company=company, m=len(themes), themes=table, n=len(batch), concepts=text)
 
     items = sorted(companies.items())
-    out = {}
-    for (key, (company, recs)), res in zip(items, ctx.parallel(items, work, '主题归类')):
+    out, tasks = {}, []
+    for (key, (company, recs)), res in zip(items, ctx.parallel(items, define, '主题归类')):
         if res is None:
             concepts = concept_list(recs)
             log(f'!!! {company} 主题归类失败，每个概念各自作为一个主题（主题级指标退化为概念级）')
-            res = concepts, [{'name': n, 'definition': '', 'concepts': [n]} for n in sorted(concepts)]
-        concepts, themes = res
-        out[key] = {'themes': themes, 'of': {c: t['name'] for t in themes for c in t['concepts']}, 'concepts': concepts}
+            res = concepts, [{'name': n, 'definition': '', 'concepts': [n]} for n in sorted(concepts)], []
+        concepts, themes, rest = res
+        out[key] = {'themes': themes, 'concepts': concepts}
+        tasks += [(key, company, rest[i:i + THEME_BATCH]) for i in range(0, len(rest), THEME_BATCH)]
+    todo = [(company, out[key]['concepts'], out[key]['themes'], batch) for key, company, batch in tasks]
+    for (key, company, batch), res in zip(tasks, ctx.parallel(todo, place, '概念归入主题')):
+        if res is None:
+            log(f'!!! {company} 有一批概念（{len(batch)} 个）归入主题失败，这些概念各自单独成一个主题')
+            res = dict.fromkeys(batch)
+        themes = out[key]['themes']
+        by_name = {t['name']: t for t in themes}
+        for c in batch:
+            if res.get(c) in by_name:
+                by_name[res[c]]['concepts'].append(c)
+            else:  # 和哪个主题都不相关：单独成一个主题
+                themes.append({'name': c if c not in by_name else f'{c}（单列）', 'definition': '', 'concepts': [c]})
+    for key, v in out.items():
+        n_seed = sum(len(t['concepts']) for t in v['themes'] if t['definition'] or len(t['concepts']) > 1)
+        single = sum(len(t['concepts']) == 1 and not t['definition'] for t in v['themes'])
+        if any(k == key for k, *_ in tasks):
+            log(f'{companies[key][0]}：{len(v["concepts"])} 个概念，先用 {min(THEME_SEED, len(v["concepts"]))} 个定出主题，'
+                f'其余分批归入；最后 {len(v["themes"]) - single} 个主题，另有 {single} 个概念和哪个主题都不相关、单独成主题')
+        v['of'] = {c: t['name'] for t in v['themes'] for c in t['concepts']}
     return out
 
 
@@ -400,7 +470,7 @@ def report_metrics(x, group, theme_names, peers, window_days):
 
 # ==================== 主流程 ====================
 
-def main(out_dir, edge_set='all', peers='all', window_days=None):
+def main(out_dir, edge_set='all', peers='all', window_days=None, workers=None):
     """out_dir：report_logic 的输出目录（读其中的 data/graphs/，结果写到 data/compare/）；edge_set：'all' 全部边 / 'text' 去掉逻辑补全边；
     peers：'all' 同公司其他全部研报 / 'prior' 只用更早发布的（window_days 限定往前多少天，None 为不限）。"""
     if edge_set not in ('all', 'text') or peers not in ('all', 'prior'):
@@ -409,7 +479,7 @@ def main(out_dir, edge_set='all', peers='all', window_days=None):
     data = read_graphs(out.root)
     set_log_path(out.log)
     env = load_env()
-    ctx = Ctx(env, out.root, {})
+    ctx = Ctx(env, out.root, {}, workers)
     out_dir = out.compare
     out_dir.mkdir(parents=True, exist_ok=True)
     companies = defaultdict(list)

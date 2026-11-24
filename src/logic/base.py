@@ -5,7 +5,7 @@ import re
 import threading
 import time
 import unicodedata
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pyarrow as pa
@@ -39,6 +39,7 @@ MAX_RETRIES = 4  # 单次调用输出不合格时的重试次数
 DEFAULT_CONCURRENCY = 50
 
 _lock = threading.Lock()
+_cache_lock = threading.Lock()
 
 
 # ==================== 名称和引文 ====================
@@ -222,7 +223,7 @@ def write_parquet(rows, path, columns):
 
 # ==================== prompt ====================
 
-STEPS = ('建表', '整理', '抽取', '并列', '悬挂', '补全', '归一')  # 每步有 “-System”“-User” 两节
+STEPS = ('建表', '整理', '抽取', '并列', '悬挂', '补全', '归一', '主题', '主题归入')  # 每步有 “-System”“-User” 两节
 SHARED = '共用-'  # 以此开头的节只是共用的规则，在别的节里用 {{共用-…}} 引用，加载时原样展开
 
 
@@ -269,6 +270,10 @@ def with_feedback(base):
 
 # ==================== 大模型调用 ====================
 
+class CallFailed(RuntimeError):
+    """一次调用重试用完仍不合格，或接口返回了不可重试的错误。各步按自己的方式兜底，这次调用不写缓存，重新运行会再试。"""
+
+
 class LLM:
     """在 LLMClient 外面加上：输出解析失败时重试（可把上次的错误告诉模型）、用量统计。"""
 
@@ -278,7 +283,7 @@ class LLM:
 
     def ask(self, system, user, parse, lenient=None):
         """user 可以是字符串，或接收上一次错误（首次为 None）返回 prompt 的函数。
-        重试用完仍不合格时，若给了 lenient，用它从最后一次回复中取出合格的部分。"""
+        重试用完仍不合格时，若给了 lenient，用它从最后一次回复中取出合格的部分，否则抛出 CallFailed；致命错误照常抛出。"""
         err, content = None, None
         for _ in range(MAX_RETRIES):
             prompt = user(err) if callable(user) else user
@@ -295,47 +300,82 @@ class LLM:
                 err = e
                 with _lock:
                     self.usage['retries'] += 1
+            except FatalAPIError:
+                raise
+            except RuntimeError as e:  # 接口返回了不可重试的错误（如 HTTP 400）
+                raise CallFailed(str(e)) from e
         if lenient and content is not None:
             try:
                 return lenient(content)
             except (ValueError, KeyError, TypeError, AttributeError):
                 pass
-        raise RuntimeError(f'连续 {MAX_RETRIES} 次不合格：{err}')
+        raise CallFailed(f'连续 {MAX_RETRIES} 次不合格：{err}')
 
 
-def run_parallel(items, fn, workers, label):
-    """并行执行 fn(item)，返回结果列表（与 items 同序，失败为 None）；致命错误时停止全部任务。"""
+def run_parallel(items, fn, workers, label, pool=None):
+    """并行执行 fn(item)，返回结果列表（与 items 同序，失败为 None）；致命错误时停止全部任务。
+    pool：共用的线程池。几批研报同时推进时，各批各步的任务都交给它，同时在途的调用数由它的线程数限定；不给时自己开一个。"""
     results, t0 = [None] * len(items), time.time()
     if not items:
         return results
-    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
+    own = pool is None
+    if own:
+        pool = ThreadPoolExecutor(max_workers=min(workers, len(items)))
+    try:
         futures = {pool.submit(fn, it): i for i, it in enumerate(items)}
         for k, fut in enumerate(as_completed(futures), 1):
             try:
                 results[futures[fut]] = fut.result()
             except FatalAPIError as e:
-                pool.shutdown(wait=False, cancel_futures=True)
+                for f in futures:
+                    f.cancel()
                 raise SystemExit(f'致命错误，已停止（已完成的部分保存在缓存中，处理后重新运行即可继续）：{e}')
             except Exception as e:  # 单项失败不影响其他项
                 log(f'{label} 第 {futures[fut] + 1} 项失败：{e}')
-            if k % max(1, len(items) // 10) == 0 or k == len(items):
+            if own and (k % max(1, len(items) // 10) == 0 or k == len(items)):  # 几批同时推进时不逐步打进度，只看各批完成的那一行
                 log(f'{label}：{k}/{len(items)}，用时 {time.time() - t0:.0f} 秒')
+    finally:
+        if own:
+            pool.shutdown(wait=False, cancel_futures=True)
     return results
 
 
 class Ctx:
-    """整次运行共用的东西：大模型、prompt、输出目录、各篇研报的元信息、并发数。"""
+    """整次运行共用的东西：大模型、prompt、输出目录、各篇研报的元信息、并发数、各步的调用缓存（分批处理时各批共用，不必每批重读）；
+    以及逐篇记下的问题：errors 为某一篇在某一步出错（{report_id: [说明]}），call_failed 为有调用失败、已按各步的方式兜底的研报。"""
 
-    def __init__(self, env, out_dir, metas):
+    def __init__(self, env, out_dir, metas, workers=None):
         self.llm, self.prompts, self.out_dir, self.metas = LLM(env), load_prompts(), out_dir, metas
-        self.workers = int(env.get('CONCURRENCY') or DEFAULT_CONCURRENCY)
+        self.workers = int(workers or env.get('CONCURRENCY') or DEFAULT_CONCURRENCY)  # 同时在途的大模型调用数
+        self.caches = {}  # {缓存文件: {键: 缓存行}}
+        self.pool = None  # 共用的线程池：几批研报同时推进时由调用方设置，各步的并行任务都交给它
+        self.errors, self.call_failed = defaultdict(list), set()
 
     def about(self, rid):
         """各步 User prompt 开头的研报公司、标题。"""
         return {'company': self.metas[rid]['company'] or '未知', 'title': self.metas[rid]['title']}
 
+    def note(self, rid, label, e):
+        """记下某一篇的问题：调用失败（CallFailed）记进 call_failed，其他异常记进 errors。"""
+        with _lock:
+            if isinstance(e, CallFailed):
+                self.call_failed.add(rid)
+            else:
+                self.errors[rid].append(f'{label}：{type(e).__name__}: {e}')
+
     def parallel(self, items, fn, label):
-        return run_parallel(items, fn, self.workers, label)
+        """run_parallel，另外把属于某一篇研报的任务（任务本身是 Report，或第一个元素是 Report 的元组）的异常记到这一篇上。"""
+        def run(it):
+            try:
+                return fn(it)
+            except FatalAPIError:
+                raise
+            except Exception as e:
+                r = it if isinstance(it, Report) else it[0] if isinstance(it, tuple) and it else None
+                if isinstance(r, Report):
+                    self.note(r.rid, label, e)
+                raise
+        return run_parallel(items, run, self.workers, label, self.pool)
 
 
 _MISSING = object()
@@ -351,7 +391,10 @@ class Step:
         self.system = ctx.prompts[system or f'{step}-System']
         self.user = ctx.prompts[user or f'{step}-User']
         self.sig = prompt_sig(ctx.prompts, *(sig or (step,)))
-        self.cache = {r['key']: r for r in load_jsonl(self.path)}
+        with _cache_lock:  # 几批同时推进时，同一个缓存文件只读一次、各批共用同一个字典
+            if self.path not in ctx.caches:
+                ctx.caches[self.path] = {r['key']: r for r in load_jsonl(self.path)}
+        self.cache = ctx.caches[self.path]
 
     def key(self, *parts):
         return text_hash(self.sig, *parts)
@@ -372,15 +415,21 @@ class Step:
         append_jsonl(self.path, row)
 
     def call(self, parse, lenient=None, **user_kw):
-        """不查缓存，直接调用：输出不合格时带上错误说明重试，用完重试次数抛出 RuntimeError。"""
+        """不查缓存，直接调用：输出不合格时带上错误说明重试，用完重试次数抛出 CallFailed（RuntimeError 的子类）。"""
         return self.ctx.llm.ask(self.system, with_feedback(fill(self.user, **user_kw)), parse, lenient)
 
     def ask(self, key, parse, lenient=None, extra=None, **user_kw):
-        """有缓存直接返回；否则调用并写入缓存（extra 为缓存行中另外记下的字段）。失败时抛出 RuntimeError，不写缓存。"""
+        """有缓存直接返回；否则调用并写入缓存（extra 为缓存行中另外记下的字段）。失败时抛出 CallFailed，不写缓存，
+        extra 中有 report_id 时把这一篇记为有调用失败（各步兜底之后照常输出，但不存档，下次运行重试）。"""
         hit = self.get(key)
         if hit is not _MISSING:
             return hit
-        res = self.call(parse, lenient, **user_kw)
+        try:
+            res = self.call(parse, lenient, **user_kw)
+        except CallFailed as e:
+            if extra and 'report_id' in extra:
+                self.ctx.note(extra['report_id'], self.path.stem, e)
+            raise
         self.put(key, res, **(extra or {}))
         return self.get(key)
 
@@ -392,7 +441,8 @@ class Report:
     第 1 步 table（概念表）；第 2 步 rels（原文抽取记录）、new_vars、rejected、extra/attached/unresolved（悬挂补全）、
     kept/parallel（并列复核）、cut/tops（包含关系缩减）、groups（按层归类）、hints（原文线索）；
     建图之后 g（缩减后的图）、g0（缩减前的图）、info、removed、isolated、merged、acc_unmatched、ref_text；
-    第 3 步 added、ref_done；第 4 步 replaced、pruned。"""
+    第 3 步 added、ref_done；第 4 步 replaced、pruned。
+    走完第 1-4 步后整个对象 pickle 存档（见 src/report_logic.py），重跑时直接读回，所以挂在上面的东西都要能 pickle。"""
 
     def __init__(self, rid, meta, paras):
         self.rid, self.meta, self.paras = rid, meta, paras

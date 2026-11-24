@@ -1,0 +1,266 @@
+<!doctype html>
+<!--
+概念 DAG 结构统计页面的模板：src/viz/plot_dag_structure.py 把数据（JSON）替换进 __DATA__，写到 <输出目录>/概念DAG结构.html。
+三张图：每篇研报的源汇比、唯一有向路径数（对数坐标）、路径的平均长度，各一行一条，按数值排序；悬停看明细，下方表格列出全部指标和统一前的对照。
+不依赖外部库，离线可看。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>概念 DAG 结构</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #fcfcfb; --panel: #ffffff; --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7a7974;
+  --line: #e4e3df; --grid: #eeede9; --axis: #b9b8b2; --series-1: #2a78d6; --series-1-hover: #1f62b3; --ref: #52514e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface: #1a1a19; --panel: #222220; --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --line: #34332f; --grid: #2c2b28; --axis: #5a5953; --series-1: #3987e5; --series-1-hover: #64a2ee; --ref: #c3c2b7;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #1a1a19; --panel: #222220; --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+  --line: #34332f; --grid: #2c2b28; --axis: #5a5953; --series-1: #3987e5; --series-1-hover: #64a2ee; --ref: #c3c2b7;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface); color: var(--text-primary);
+  font: 14px/1.55 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 20px 20px 48px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.sub { color: var(--text-secondary); font-size: 13px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 18px 0 8px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.tile .k { color: var(--text-secondary); font-size: 12px; }
+.tile .v { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.25; }
+.tile .d { color: var(--text-muted); font-size: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 10px; margin-top: 16px; }
+.card h2 { font-size: 15px; margin: 0; }
+.card .take { color: var(--text-secondary); font-size: 13px; margin: 2px 0 6px; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { fill: var(--text-secondary); font-size: 12px; }
+.chart .lbl { fill: var(--text-primary); }
+.chart .tick { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart .axis { stroke: var(--axis); stroke-width: 1; }
+.chart .ref { stroke: var(--ref); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.chart .reftext { fill: var(--ref); font-size: 11px; }
+.chart .bar { fill: var(--series-1); }
+.chart .row:hover .bar, .chart .row.on .bar { fill: var(--series-1-hover); }
+.chart .row:hover .lbl { font-weight: 600; }
+.chart .hit { fill: transparent; cursor: default; }
+.tip { position: absolute; pointer-events: none; background: var(--panel); color: var(--text-primary); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.5; box-shadow: 0 4px 14px rgba(0,0,0,.12);
+  white-space: nowrap; display: none; z-index: 5; }
+.tip b { font-weight: 600; }
+.tip .m { color: var(--text-secondary); }
+.defs { color: var(--text-secondary); font-size: 13px; margin-top: 16px; }
+.defs dt { font-weight: 600; color: var(--text-primary); margin-top: 6px; }
+.defs dd { margin: 0 0 0 0; }
+details.tbl { margin-top: 16px; }
+details.tbl summary { cursor: pointer; font-weight: 600; font-size: 15px; }
+.tablewrap { overflow-x: auto; margin-top: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th { color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+th:first-child, td:first-child { text-align: left; }
+td .was { color: var(--text-muted); font-size: 11px; margin-left: 4px; }
+@media (max-width: 640px) { .wrap { padding: 16px; } .tile .v { font-size: 22px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="title">概念 DAG 结构</h1>
+  <div class="sub" id="sub"></div>
+  <div class="tiles" id="tiles"></div>
+
+  <div class="card">
+    <h2>源汇比（源点数 ÷ 汇点数）</h2>
+    <div class="take" id="take-ratio"></div>
+    <div class="chart" id="c-ratio"></div>
+  </div>
+
+  <div class="card">
+    <h2>唯一有向路径数（源点到汇点的完整因果链条数，对数坐标）</h2>
+    <div class="take" id="take-paths"></div>
+    <div class="chart" id="c-paths"></div>
+  </div>
+
+  <div class="card">
+    <h2>路径的平均长度（每篇所有完整路径的平均边数）</h2>
+    <div class="take" id="take-mean"></div>
+    <div class="chart" id="c-mean"></div>
+  </div>
+
+  <details class="tbl" open>
+    <summary>明细表</summary>
+    <div class="tablewrap"><table id="tbl"></table></div>
+  </details>
+
+  <dl class="defs">
+    <dt>算法</dt>
+    <dd>每篇研报一张图：概念 DAG 里进图的边，按跨研报统一后的名称改写（unify_concept_dag.py 的结果），同一篇里改写后重复的边合并；没有边的孤立概念不算。统一后若出现环，按引文数从少到多删边去环（表中“去环”列）。</dd>
+    <dt>源点 / 汇点</dt>
+    <dd>没有入边的概念（只作原因）/ 没有出边的概念（只作结果）。源汇比大于 1：多个原因收敛到较少的结论；小于 1：少数原因发散出较多结果。</dd>
+    <dt>唯一有向路径数</dt>
+    <dd>从源点出发、沿箭头走到汇点的不同路径条数（经过的概念序列不同就算不同的路径），即这篇研报里完整的因果链条数；用动态规划计数。</dd>
+    <dt>路径长度</dt>
+    <dd>一条路径的边数（经过的概念数减 1），长度 1 表示源点直接指向汇点。每篇的平均路径长度是这篇所有完整路径边数的平均，每条路径权重相同；顶部数字是各篇平均值的中位数；“全部路径合计”把所有研报的路径放在一起平均，路径多的长报告分量更重。</dd>
+    <dt>共有路径</dt>
+    <dd>这篇的某条完整路径（统一名称后的概念序列）在同一公司其他研报里也完整出现过。</dd>
+    <dt>统一前</dt>
+    <dd>表中灰色小字：同样的指标在各篇原始概念名的 DAG 上的值。</dd>
+  </dl>
+</div>
+<div class="tip" id="tip"></div>
+<script>
+const DATA = __DATA__;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const fmt = n => n == null ? '—' : Number(n).toLocaleString('zh-CN');
+const fmtDate = d => d && d.length === 8 ? `${d.slice(4, 6)}-${d.slice(6)}` : d;
+const label = r => `${r.broker} ${fmtDate(r.date)}`;
+const R = DATA.reports;
+const median = xs => { const s = xs.slice().sort((a, b) => a - b), n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : null; };
+
+// ---------- 抬头 ----------
+$('title').textContent = `${DATA.companies.join('、')} 深度报告 · 概念 DAG 结构`;
+$('sub').textContent = `${R.length} 篇研报 · 按跨研报统一后的名称计算（不同名称 ${DATA.unify.n_terms} → ${DATA.unify.n_terms_after} 个，合并 ${DATA.unify.n_groups} 组）· 统一结果生成于 ${DATA.unify_generated} · 本页生成于 ${DATA.generated}`;
+const ratios = R.map(r => r.after.ratio).filter(x => x != null), counts = R.map(r => r.after.n_paths);
+const shared = R.filter(r => r.after.n_shared != null), sumP = shared.reduce((a, r) => a + r.after.n_paths, 0), sumS = shared.reduce((a, r) => a + r.after.n_shared, 0);
+const means = R.map(r => r.after.len_mean).filter(x => x != null);
+let allN = 0, allK = 0;  // 全部研报的路径合在一起：条数、边数之和
+R.forEach(r => Object.entries(r.after.lengths).forEach(([k, n]) => { allN += n; allK += k * n; }));
+const tile = (k, v, d) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
+$('tiles').innerHTML = [
+  tile('源汇比中位数', median(ratios).toFixed(2), `范围 ${Math.min(...ratios).toFixed(2)} – ${Math.max(...ratios).toFixed(2)}，${ratios.filter(x => x > 1).length} 篇大于 1`),
+  tile('唯一有向路径数中位数', fmt(Math.round(median(counts))), `范围 ${fmt(Math.min(...counts))} – ${fmt(Math.max(...counts))} 条`),
+  tile('平均路径长度中位数', median(means).toFixed(2), `各篇 ${Math.min(...means).toFixed(2)} – ${Math.max(...means).toFixed(2)} 条边；全部 ${fmt(allN)} 条路径合计 ${allN ? (allK / allN).toFixed(2) : '—'}`),
+  tile('与其他研报共有的路径', sumP ? (100 * sumS / sumP).toFixed(1) + '%' : '—', `${fmt(sumS)} / ${fmt(sumP)} 条完整路径`),
+].join('');
+$('take-ratio').textContent = `中位数 ${median(ratios).toFixed(2)}：${ratios.filter(x => x > 1).length} 篇源点多于汇点（原因收敛到较少的结论），${ratios.filter(x => x < 1).length} 篇少于汇点。虚线是源点 = 汇点。`;
+const byPaths = R.slice().sort((a, b) => b.after.n_paths - a.after.n_paths), last = byPaths[byPaths.length - 1];
+$('take-paths').textContent = `各篇相差很大：最多的 ${label(byPaths[0])} 有 ${fmt(byPaths[0].after.n_paths)} 条，最少的 ${label(last)} 只有 ${fmt(last.after.n_paths)} 条；路径数随边数和链条长度大致成倍增长。`;
+const rank = xs => {  // 秩（并列取平均秩）
+  const idx = xs.map((v, i) => [v, i]).sort((a, b) => a[0] - b[0]), out = Array(xs.length);
+  for (let i = 0; i < idx.length;) {
+    let j = i; while (j + 1 < idx.length && idx[j + 1][0] === idx[i][0]) j++;
+    for (let k = i; k <= j; k++) out[idx[k][1]] = (i + j) / 2 + 1;
+    i = j + 1;
+  }
+  return out;
+};
+const pearson = (a, b) => {
+  const n = a.length, ma = a.reduce((s, x) => s + x, 0) / n, mb = b.reduce((s, x) => s + x, 0) / n;
+  let num = 0, da = 0, db = 0;
+  a.forEach((x, i) => { num += (x - ma) * (b[i] - mb); da += (x - ma) ** 2; db += (b[i] - mb) ** 2; });
+  return da && db ? num / Math.sqrt(da * db) : null;
+};
+const byMean = R.filter(r => r.after.len_mean != null).sort((a, b) => b.after.len_mean - a.after.len_mean), lastMean = byMean[byMean.length - 1];
+const rho = byMean.length > 2 ? pearson(rank(byMean.map(r => r.after.len_mean)), rank(byMean.map(r => r.after.n_paths))) : null;
+$('take-mean').textContent = `中位数 ${median(means).toFixed(2)} 条边：最长的 ${label(byMean[0])} 平均 ${byMean[0].after.len_mean.toFixed(2)} 条，最短的 ${label(lastMean)} ${lastMean.after.len_mean.toFixed(2)} 条。` +
+  (rho == null ? '' : `与唯一有向路径数的秩相关 ${rho.toFixed(2)}${rho >= 0.5 ? '：路径多的研报，链条也更长' : ''}。`);
+
+// ---------- 横向条形图 ----------
+const tip = $('tip');
+function showTip(ev, html) {
+  tip.innerHTML = html; tip.style.display = 'block';
+  const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = ev.pageX + pad, y = ev.pageY + pad;
+  if (x + w > window.scrollX + document.documentElement.clientWidth - 8) x = ev.pageX - w - pad;
+  if (y + h > window.scrollY + window.innerHeight - 8) y = ev.pageY - h - pad;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.style.display = 'none'; };
+
+function niceTicks(max, n = 5) {
+  const step0 = max / n, mag = Math.pow(10, Math.floor(Math.log10(step0))), r = step0 / mag;
+  const step = (r <= 1 ? 1 : r <= 2 ? 2 : r <= 2.5 ? 2.5 : r <= 5 ? 5 : 10) * mag;
+  const out = []; for (let v = 0; v <= max + step * 1e-9; v += step) out.push(+v.toFixed(10));
+  if (out[out.length - 1] < max) out.push(+(out[out.length - 1] + step).toFixed(10));
+  return out;
+}
+
+function barChart(el, rows, {value, log = false, ref = null, refText = '', tipHtml, tickFmt = fmt}) {
+  const W = Math.max(320, el.clientWidth), narrow = W < 560;
+  const labelW = narrow ? 92 : 132, padR = 18, rowH = 22, barH = 14, top = ref != null ? 20 : 6, axisH = 26;
+  const plotW = W - labelW - padR, H = top + rows.length * rowH + axisH;
+  const vals = rows.map(value);
+  let x, ticks;
+  if (log) {
+    const hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...vals, 10))));
+    ticks = []; for (let v = 1; v <= hi; v *= 10) ticks.push(v);
+    x = v => labelW + plotW * Math.log10(Math.max(v, 1)) / Math.log10(hi);
+  } else {
+    ticks = niceTicks(Math.max(...vals, ref || 0));
+    const hi = ticks[ticks.length - 1];
+    x = v => labelW + plotW * v / hi;
+  }
+  const x0 = log ? x(1) : x(0);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+  ticks.forEach(t => {
+    s += `<line class="grid" x1="${x(t)}" x2="${x(t)}" y1="${top - 2}" y2="${top + rows.length * rowH}"/>` +
+      `<text class="tick" x="${x(t)}" y="${top + rows.length * rowH + 16}" text-anchor="middle">${tickFmt(t)}</text>`;
+  });
+  s += `<line class="axis" x1="${x0}" x2="${x0}" y1="${top - 2}" y2="${top + rows.length * rowH}"/>`;
+  rows.forEach((r, i) => {
+    const y = top + i * rowH, v = value(r), xe = x(v), w = Math.max(0, xe - x0), rr = Math.min(4, w / 2, barH / 2);
+    // 数据端 4px 圆角、贴基线的一端不圆
+    const path = w > 0 ? `M${x0},${y + (rowH - barH) / 2} h${w - rr} a${rr},${rr} 0 0 1 ${rr},${rr} v${barH - 2 * rr} a${rr},${rr} 0 0 1 ${-rr},${rr} h${-(w - rr)} z` : '';
+    s += `<g class="row" data-i="${i}"><rect class="hit" x="0" y="${y}" width="${W}" height="${rowH}"/>` +
+      `<text class="lbl" x="${labelW - 8}" y="${y + rowH / 2 + 4}" text-anchor="end">${esc(narrow ? fmtDate(r.date) + ' ' + r.broker.replace('证券', '') : label(r))}</text>` +
+      (path ? `<path class="bar" d="${path}"/>` : '') + '</g>';
+  });
+  if (ref != null) {
+    s += `<line class="ref" x1="${x(ref)}" x2="${x(ref)}" y1="${top - 6}" y2="${top + rows.length * rowH}"/>` +
+      `<text class="reftext" x="${x(ref)}" y="${top - 9}" text-anchor="middle">${esc(refText)}</text>`;
+  }
+  el.innerHTML = s + '</svg>';
+  el.querySelectorAll('.row').forEach(g => {
+    const r = rows[+g.dataset.i];
+    g.addEventListener('mousemove', ev => showTip(ev, tipHtml(r)));
+    g.addEventListener('mouseleave', hideTip);
+  });
+}
+
+const head = r => `<b>${esc(r.company)} · ${esc(r.broker)} · ${esc(r.date)}</b><br>`;
+function draw() {
+  const byRatio = R.filter(r => r.after.ratio != null).sort((a, b) => b.after.ratio - a.after.ratio);
+  barChart($('c-ratio'), byRatio, {value: r => r.after.ratio, ref: 1, refText: '源 = 汇', tickFmt: t => t.toFixed(t < 10 && t % 1 ? 1 : 0),
+    tipHtml: r => head(r) + `源汇比 <b>${r.after.ratio.toFixed(2)}</b>（源点 ${r.after.n_sources} ÷ 汇点 ${r.after.n_sinks}）<br>` +
+      `<span class="m">进图概念 ${r.after.n_nodes} 个、边 ${r.after.n_edges} 条；统一前源汇比 ${r.before.ratio?.toFixed(2) ?? '—'}</span>`});
+  barChart($('c-paths'), byPaths, {value: r => r.after.n_paths, log: true,
+    tickFmt: t => t >= 1e6 ? t / 1e6 + 'M' : t >= 1e3 ? t / 1e3 + 'k' : t,
+    tipHtml: r => head(r) + `唯一有向路径 <b>${fmt(r.after.n_paths)}</b> 条<br>` +
+      `<span class="m">路径长度平均 ${r.after.len_mean?.toFixed(2) ?? '—'}、中位数 ${r.after.len_median}、最长 ${r.after.len_max} 条边；与其他研报共有 ${r.after.n_shared == null ? '—（路径太多未展开）' : fmt(r.after.n_shared) + ' 条'}<br>` +
+      `进图概念 ${r.after.n_nodes} 个、边 ${r.after.n_edges} 条；统一前 ${fmt(r.before.n_paths)} 条</span>`});
+  barChart($('c-mean'), byMean, {value: r => r.after.len_mean, tickFmt: t => t % 1 ? t.toFixed(1) : t,
+    tipHtml: r => head(r) + `平均路径长度 <b>${r.after.len_mean.toFixed(2)}</b> 条边（${fmt(r.after.n_paths)} 条路径）<br>` +
+      `<span class="m">中位数 ${r.after.len_median}、最长 ${r.after.len_max}；统一前平均 ${r.before.len_mean?.toFixed(2) ?? '—'}<br>` +
+      `各长度的路径条数：${lenDist(r.after.lengths)}</span>`});
+}
+const lenDist = L => Object.entries(L).map(([k, n], i) => `${i && i % 5 === 0 ? '<br>' : ''}${k} 步 ${fmt(n)}`).join(' · ');
+draw();
+let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(draw, 120); });
+
+// ---------- 明细表 ----------
+const was = (a, b, f = fmt) => a === b ? '' : `<span class="was">${f(b)}</span>`;
+const f2 = x => x == null ? '—' : x.toFixed(2);
+$('tbl').innerHTML = '<thead><tr><th>研报</th><th>正文字数</th><th>进图概念</th><th>边</th><th>源点</th><th>汇点</th><th>源汇比</th>' +
+  '<th>唯一有向路径</th><th>路径长度 平均 / 中位 / 最长</th><th>共有路径</th><th>去环</th></tr></thead><tbody>' +
+  R.slice().sort((a, b) => a.date.localeCompare(b.date)).map(r => {
+    const a = r.after, b = r.before;
+    return `<tr><td>${esc(r.date)} ${esc(r.broker)}</td><td>${fmt(r.n_chars)}</td><td>${a.n_nodes}${was(a.n_nodes, b.n_nodes)}</td>` +
+      `<td>${a.n_edges}${was(a.n_edges, b.n_edges)}</td><td>${a.n_sources}${was(a.n_sources, b.n_sources)}</td>` +
+      `<td>${a.n_sinks}${was(a.n_sinks, b.n_sinks)}</td><td>${f2(a.ratio)}${was(a.ratio, b.ratio, f2)}</td>` +
+      `<td>${fmt(a.n_paths)}${was(a.n_paths, b.n_paths)}</td><td>${f2(a.len_mean)}${was(a.len_mean, b.len_mean, f2)} / ${a.len_median} / ${a.len_max}</td>` +
+      `<td>${a.n_shared == null ? '—' : fmt(a.n_shared)}</td><td>${a.n_cycle_removed || ''}</td></tr>`;
+  }).join('') + '</tbody>';
+</script>
+</body>
+</html>

@@ -9,25 +9,38 @@
     para_id    段落在研报内的序号（整数，从 1 开始）
     text       段落文字
 可选列（缺失时留空，只用于给大模型提供上下文和在 HTML 中展示）：
-    file（相对输入目录的路径）、date（目录的年/月/日，YYYYMMDD）、broker（“资料来源”行里出现最多的券商）、
-    company、stock_code（文件开头唯一出现的“公司名（代码）”；行业报告等出现多个代码时留空）、
+    file（相对输入目录的路径）、date、broker、company、stock_code（取法见 src/report_meta.py）、
     title（纯文本里没有可靠的标题位置，留空）、page（纯文本没有页码，留空）、section（段落所属的小标题）
 
+同时写一张研报元数据表（每篇研报一行，路径见 reports_table_path：段落表文件名里的 paragraphs 换成 reports，另有同名 .csv
+便于用 Excel 查看）：report_id、file、date、broker、report_type、is_stock_report（是不是个股公司研报）、company、stock_code、
+analysts、analyst_ids、status（ok 有正文 / empty 空文件、扫描件、乱码、外文 / failed 读取失败）、n_paragraphs、n_chars。
+输入目录里的每个文件都有一行，和段落表用 report_id 对应；逻辑链抽取按这张表筛选要抽取的研报。
+
 纯文本没有字号和坐标，这里只看文字本身，按行（行内再按项目符号和连续空格切开）判断：
-  1. 预处理：去掉模板标记（[Table_Title]、＃summary＃ 等）和行内的“请务必阅读…声明”类水印；
+  1. 预处理：去掉模板标记（[Table_Title]、＃summary＃ 等）和行内的“请务必阅读…声明”类水印（“…信息披露和法律声明”
+     “…重要声明及评级说明”连同和、及后面的部分一起删）；
      抽成“?”的项目符号和行首的 ●▌ 等符号处切开并强制分段；连续 3 个以上空格、句末标点后的 2 个以上空格处切开；
+     资料来源和下一段正文抽在同一行的（“资料来源：公司公告，东北证券公司已经形成…”），按本篇资料来源惯用的结尾（券商名）切开；
   2. 末尾声明：从“免责声明”“分析师声明”“评级说明”等小标题（出现在全文字数的 40% 之后）开始，之后全部丢弃；
+     以“和、及”开头的水印残段、带句读的句子、图表标题不算声明小标题，“信息披露”只认单独成行的（正文里有“加强信息披露监管”）；
   3. 逐行剔除：在全篇中重复出现 3 次以上的短行（页眉页脚）、页码、图表标题和资料来源、目录、相关研究、
      分析师联系方式；没有汉字的行（坐标轴刻度、图例数字）；数字和数字串占比高、没有句读的行（表格）；
   4. 拼段：没有句读的短行是侧栏、图例或小标题，后面紧跟正文的记为小标题（作为后续段落的 section），其余只作分段点；
      上一行没有以句号等结尾就接着拼，项目符号处另起一段；只有一行、没写满一行（按本篇折行的行宽估计）且不以句号等结尾的
      短段是小标题；后面跟着日期的行是相关研究的条目，丢弃；
-  5. 段落后处理：剔除风险提示（风险小节整节丢弃，段尾的“风险提示：…”截掉），丢掉声明套话、分析师简介、
+  5. 段落后处理：剔除风险提示（风险小节整节丢弃，段首或句末之后出现的“风险提示：…”“3.8. 风险提示 …”截到段尾），丢掉声明套话、分析师简介、
      汉字占比或句读过少的段落（表格残留）、没有句末标点的短段（标题、侧栏残留）和重复段落（首页摘要与正文重复），
      过短的段落并入同一小节的相邻段落，过长的按句子切开。
 
-运行：在仓库根目录执行 python clear_txt.py（输入、输出路径和试跑篇数在 clear_txt.py 开头设置，也可以用 --limit N 试跑）。
+各篇研报互不相关，用多进程并行处理（默认用满 CPU 核心，Windows 上一个进程池最多 60 个进程）；结果按文件顺序写出，
+和单进程运行的结果完全相同。
+
+运行：在仓库根目录执行 python clear_txt.py（输入、输出路径、试跑篇数和进程数在 clear_txt.py 开头设置，也可以用 --limit N 试跑）。
 """
+import csv
+import multiprocessing as mp
+import os
 import random
 import re
 import sys
@@ -38,6 +51,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.report_meta import META_COLUMNS, fill_analysts, fill_stocks, parse_meta
+
 CJK_RE = re.compile(r'[一-鿿]')
 SENT_END = '。！？；…'
 SENT_RE = re.compile(rf'[^{SENT_END}]+(?:[{SENT_END}]+[”’）)]*|$)')
@@ -46,10 +61,15 @@ BODY_PUNCT = '，。；、！？…'  # 有这些标点才算成句；冒号不�
 
 # 末尾声明部分的小标题（允许前面带编号和券商名）；只在全文字数的后 60% 生效，避免误伤首页“投资评级”一类的字段。
 # 每页页脚的“请务必阅读…免责声明”“敬请参阅最后一页特别声明”之类的提示不算
+# “免责”后面要跟声明、条款（正文里有“尽职免责”“期限免责”）；“信息披露”后面只能是结尾、冒号或分析师声明一类
+# （正文里有“加强信息披露监管”“自愿性信息披露公告”“公司信息披露 长源电力”）
 DISCLAIMER_HEAD_RE = re.compile(
-    r'^[\s\d一二三四五六七八九十、.．【\[]*(.{0,8}(免责|分析师声明|分析师承诺|法律声明|特别声明|一般声明|重要声明|郑重声明|版权声明|'
-    r'信息披露|分析师(介绍|简介)|研究团队简介|证券投资咨询业务)|.{0,8}评[级等]的?(说明|标准|体系|定义|比率))')
+    r'^[\s\d一二三四五六七八九十、.．【\[]*(.{0,8}(免责(声明|申明|条款)|分析师声明|分析师承诺|法律声明|特别声明|一般声明|重要声明|郑重声明|版权声明|'
+    r'信息披露(?=$|[：:】\]]|(证券)?分析师)|分析师(介绍|简介)|研究团队简介|证券投资咨询业务)|.{0,8}评[级等]的?(说明|标准|体系|定义|比率))')
 DISCLAIMER_HINT_RE = re.compile(r'请|敬请|阅读|参阅|关注|详见|见文末|见末页')
+# 不是声明小标题：以“和、及、与”开头（页脚提示被水印规则删掉一半剩下的“和法律声明”“及评级说明”）、带句读（正文句子）、
+# 图表标题（“表26：电子病历评级标准修订要点”）
+DISCLAIMER_NOT_HEAD_RE = re.compile(r'^([和及、]|与(?!公司有关))|[，。；！？]|^(图|表|图表)\s*\d')
 DISCLAIMER_HEAD_MAX_LEN = 16  # 评级体系类标题后面常跟括号说明，放宽到 40 字
 DISCLAIMER_FROM = 0.4  # 声明小标题只在全文字数的这个比例之后查找
 # 声明、评级定义、联系地址、分析师简介一类的套话：段落里出现就整段丢弃（声明小标题被截掉、只剩残段时靠这条兜底）
@@ -64,8 +84,10 @@ DISCLAIMER_TEXT_RE = re.compile(
 
 # 模板标记和行内水印：先从行里删掉再判断
 TEMPLATE_RE = re.compile(r'\[Table_\w*\]|＃[A-Za-z0-9_]+＃|glzqdatemark\d*')
+# 页脚提示常是“…信息披露和法律声明”“…重要声明及评级说明”，和、及后面的部分要一起删掉，否则剩下的“和法律声明”会被当成声明小标题
 WATERMARK_RE = re.compile(
-    r'(请务必|请仔细|敬请|请)(阅读|参阅|参考|查阅|关注)[^。！？\n]{0,40}?(声明|说明|条款|披露|内容)(部分|及其项下所有内容)?[。.]?|'
+    r'(请务必|请仔细|敬请|请)(阅读|参阅|参考|查阅|关注)[^。！？\n]{0,40}?(声明|申明|说明|条款|披露|内容)(部分|及其项下所有内容)?'
+    r'(\s*[和及与、]\s*[^。！？\n]{0,10}?(声明|申明|说明|条款|披露|内容)(部分)?)*[。.]?|'
     r'请通过合法途径获取[^。\n]*?(。|$)(如经由[^。\n]*?(。|$))?|[\s　]*[1-9]\d{0,2}\s*/\s*[1-9]\d{0,2}\s*$')
 # 抽成“?”的项目符号（左边是行首、空白、汉字或标点，右边是汉字、括号、数字）、私用区的符号字体字符；
 # 左边是行首、空白或句末标点时右边也可以是字母（“。?Q3自产煤…”），汉字中间的“?X Elite”多半是 ® 等符号，不切
@@ -79,6 +101,11 @@ CAPTION_RE = re.compile(
     r'^\s*(图|表|图表|附图|附表|Figure|Exhibit|Table|Chart)\s*([\d一二三四五六七八九十]+|$)|'
     r'^\s*(资料来源|数据来源|来源|注|备注|Source|Sources)\s*[:：]|\.{5,}|…{3,}|·{5,}|^\s*(图表|插图|表格|图|表)?目\s*录\s*$', re.I)
 SHORT_CAPTION_RE = re.compile(r'(资料|数据)来源[:：]')  # 短行中间出现的资料来源（“历史表现 数据来源：wind…”）
+# 资料来源行（前面可带页码）；有的版式资料来源和下一段正文抽在同一行（“资料来源：公司公告，东北证券公司已经形成…”）
+SOURCE_LINE_RE = re.compile(r'^\d{0,3}\s*(资料|数据)?来源\s*[:：]')
+# 资料来源后面切下来的部分以这些开头时是注释或来源的延续，不当正文
+SOURCE_TAIL_SKIP_RE = re.compile(r'^([和及与、，,；;。.（(）)\[【]|(注|说明|备注|单位|其中)\d?\s*[:：]?|预测|整理|测算|估算|计算|绘制|制图)')
+SOURCE_NOTE_RE = re.compile(r'\s*(预测|整理|测算)?[，,]?\s*(注|说明|备注)\d?\s*[:：][^。]*。')
 META_RE = re.compile(
     r'^\s*(\d+[.、]\s*)?《|》\s*$|》[，,]?\s*[—\-]*\s*\d{4}[.\-/年]\d{1,2}|^\s*相关(研究|报告)|^\s*附(录|表)|'
     r'执业证书|执业编号|登记编号|执证编号|SAC\s*(执业|执证|编号|No)|S\d{13}|[\w.\-]+[@＠][\w\-]+\.[\w.]+|电话[:：]|邮箱[:：]|\d{3,4}-\d{7,8}', re.I)
@@ -104,21 +131,9 @@ SIDEBAR_LABEL_RE = re.compile(r'市场走势|股价表现|股价走势|历史表
 # 风险提示是按惯例罗列的风险清单，不属于推理链，整节剔除。小节标题（含首页侧栏的“风险”栏目名）整行是这些词时算风险小节，
 # “关注贸易政策调整风险”这类正文小节不受影响
 RISK_HEAD_RE = re.compile(r'^\W*([一二三四五六七八九十\d]+(\.\d+)*[、.．\s]\s*)?(主要|投资)?风险(提示|因素|分析|因素提示)?\W*$')
-# 段首或句末之后出现的“风险提示”（前面可带项目符号），以及任何位置的“风险提示：”（侧栏插进来的半句后面常直接接风险提示）：
+# 段首或句末之后出现的“风险提示”（前面可带项目符号和编号，“3.8. 风险提示”），以及任何位置的“风险提示：”（侧栏插进来的半句后面常直接接风险提示）：
 # 从这里截到段尾
-RISK_TEXT_RE = re.compile(r'(?:^|(?<=[。！？；]))\W{0,3}风险(提示|因素)|风险提示[:：]')
-
-# 公司名（代码）：只认 A 股代码；侧栏、标题里常见“贵州茅台(600519.SH)”“锦江酒店（600754）”
-CODE_RE = re.compile(r'([一-鿿A-Za-z]{2,12})\s*[（(]\s*((?:00|30|60|68)\d{4})(?:\s*[.．]\s*(SH|SZ|sh|sz))?\s*[）)]')
-META_HEAD_LINES = 40  # 公司名和代码只在开头这么多行里找
-# 券商：在“资料来源”一类的行里计数，出现最多且没有并列的算本篇券商
-BROKERS = {
-    '中金公司': ('中金公司', '中国国际金融'), '中信证券': ('中信证券',), '中信建投': ('中信建投',), '华泰证券': ('华泰证券', '华泰研究'),
-    '国泰君安': ('国泰君安',), '海通证券': ('海通证券',), '申万宏源': ('申万宏源', '申银万国'), '中国银河': ('中国银河', '银河证券'),
-    '东方财富证券': ('东方财富证券',), '群益证券': ('群益证券',), '华兴证券': ('华兴证券',), '第一上海': ('第一上海',),
-}
-SOURCE_LINE_RE = re.compile(r'来源|预测|整理|Source', re.I)
-BROKER_RE = re.compile(r'(?:^|(?<=[：:，,、\s;；(（]))([一-鿿]{2,6}?证券)(?=研究|研发|整理|预测|经济|发展|产业|股份|$|[，,；;。\s)）])')
+RISK_TEXT_RE = re.compile(r'(?:^|(?<=[。！？；]))\W{0,3}([一二三四五六七八九十\d]+(\.\d+)*[、.．]?\s*)?风险(提示|因素)|风险提示[:：]')
 
 HEADING_MAX_LEN = 30
 MIN_PARA_CHARS, MAX_PARA_CHARS = 60, 1500
@@ -130,6 +145,11 @@ MIN_REPORT_CJK = 200  # 汉字少于该数的文件视为空文件（扫描件�
 SCHEMA = pa.schema([('report_id', pa.string()), ('para_id', pa.int64()), ('file', pa.string()), ('date', pa.string()),
                     ('broker', pa.string()), ('company', pa.string()), ('stock_code', pa.string()), ('title', pa.string()),
                     ('page', pa.int64()), ('section', pa.string()), ('text', pa.string())])
+REPORT_SCHEMA = pa.schema([('report_id', pa.string()), ('file', pa.string()), ('date', pa.string()), ('broker', pa.string()),
+                           ('report_type', pa.string()), ('is_stock_report', pa.bool_()), ('company', pa.string()),
+                           ('stock_code', pa.string()), ('analysts', pa.string()), ('analyst_ids', pa.string()),
+                           ('status', pa.string()), ('n_paragraphs', pa.int64()), ('n_chars', pa.int64())])
+PARA_META = ('file', 'date', 'broker', 'company', 'stock_code', 'title')  # 段落表里每行都带的研报信息
 # 汇总里各类剔除内容的名称（字数都按去掉空白后计）
 DROP_NAMES = {'disclaimer': '免责声明', 'risk': '风险提示', 'table': '表格', 'chart': '图表数字/无汉字行',
               'caption': '图表标题/资料来源/目录', 'header': '页眉页脚/水印/联系方式/相关研究', 'sidebar': '侧栏/图例/短行',
@@ -204,6 +224,38 @@ def split_segments(text, drop):
     return segs
 
 
+def split_source_tail(segs):
+    """资料来源和正文抽在同一行时从中切开。资料来源的最后一项是券商名（“东北证券”“国信证券经济研究所整理”），
+    用本篇单独成行（不长、没有句末标点）的资料来源里出现两次以上的最后一项作为结尾，在片段里最后一次出现的结尾处切开
+    （结尾后面紧跟一句“注：……。”时切在这句之后）；切下来的部分像正文（有句读、汉字过半、不以注释或标点开头）时
+    另起一个片段，交给后面的规则判断，否则不动。"""
+    srcs = [re.sub(r'\s', '', s['text']) for s in segs if SOURCE_LINE_RE.match(s['text'])]
+    ends = Counter()
+    for t in srcs:
+        if width(t) <= SHORT_DROP_MAX and not re.search(f'[{SENT_END}]', t):
+            last = SOURCE_LINE_RE.sub('', re.split(r'[，,、；;]', t)[-1])
+            if 2 <= len(last) <= 20 and CJK_RE.search(last):
+                ends[last] += 1
+    ends = [k for k, v in ends.items() if v >= 2]
+    if not ends:
+        return segs
+    out = []
+    for s in segs:
+        t = s['text']
+        if SOURCE_LINE_RE.match(t) and width(t) > SHORT_DROP_MAX:
+            cut = max((t.rfind(k) + len(k) for k in ends if k in t), default=0)
+            note = SOURCE_NOTE_RE.match(t[cut:]) if cut else None
+            if note:  # 资料来源后面先跟一句图注（“注：……。”）再接正文：图注留在资料来源里
+                cut += note.end()
+            rest = t[cut:].strip()
+            if (cut and len(rest) >= 10 and cjk_share(rest) >= 0.5 and any(p in rest for p in BODY_PUNCT)
+                    and not SOURCE_TAIL_SKIP_RE.match(rest)):
+                out += [{**s, 'text': t[:cut].strip()}, {'text': rest, 'hard': True}]
+                continue
+        out.append(s)
+    return out
+
+
 def find_disclaimer_start(segs):
     """返回末尾声明部分第一个片段的序号；没有找到时返回 None。只在全文字数的 DISCLAIMER_FROM 之后查找。"""
     total = sum(len(s['text']) for s in segs)
@@ -214,7 +266,8 @@ def find_disclaimer_start(segs):
             continue
         t = re.sub(r'\s', '', s['text'])
         m = DISCLAIMER_HEAD_RE.match(t)
-        if m and not DISCLAIMER_HINT_RE.search(t) and len(t) <= (40 if '评' in m.group(0) else DISCLAIMER_HEAD_MAX_LEN):
+        if (m and not DISCLAIMER_HINT_RE.search(t) and not DISCLAIMER_NOT_HEAD_RE.search(t)
+                and len(t) <= (40 if '评' in m.group(0) else DISCLAIMER_HEAD_MAX_LEN)):
             return i
     return None
 
@@ -397,44 +450,10 @@ def tidy(paras, drop=None):
     return [{**p, 'text': t} for p in merged for t in split_long(p['text'])]
 
 
-def parse_meta(path, root, text):
-    """能从路径和正文开头可靠取出的元数据，取不出的留空。"""
-    rel = path.relative_to(root)
-    meta = {'file': rel.as_posix(), 'date': '', 'broker': '', 'company': '', 'stock_code': '', 'title': ''}
-    year = re.search(r'(?:19|20)\d{2}', root.name)
-    parts = rel.parts[:-1]
-    if year and len(parts) >= 2 and re.fullmatch(r'\d{2}', parts[-2]) and re.fullmatch(r'\d{2}', parts[-1]):
-        meta['date'] = year.group(0) + parts[-2] + parts[-1]
-    lines = text.splitlines()
-    codes = {}
-    for line in lines[:META_HEAD_LINES]:
-        found = CODE_RE.findall(line)
-        if '《' in line or '相关' in line or len({c for _, c, _ in found}) != 1:
-            continue  # 相关研究、多只股票的表格行不算
-        name, code, suffix = found[0]
-        codes.setdefault(code, (name, suffix))
-    if len(codes) == 1:
-        code, (name, suffix) = next(iter(codes.items()))
-        meta['stock_code'] = f'{code}.{suffix.upper() or ("SH" if code[0] == "6" else "SZ")}'
-        if len(name) > 6:  # 名字前面粘着别的字（如“建议关注海南发展”）：取正文中反复出现的最长后缀
-            name = next((name[-k:] for k in range(6, 1, -1) if text.count(name[-k:]) >= 3), '')
-        meta['company'] = name if CJK_RE.search(name) else ''
-    votes = Counter()
-    for line in lines:
-        if SOURCE_LINE_RE.search(line):
-            hit = {canon for canon, aliases in BROKERS.items() if any(a in line for a in aliases)}
-            hit |= {m for m in BROKER_RE.findall(line) if not any(m in a or a in m for al in BROKERS.values() for a in al)}
-            votes.update(hit)
-    top = votes.most_common(2)
-    if top and (len(top) == 1 or top[0][1] > top[1][1]):
-        meta['broker'] = top[0][0]
-    return meta
-
-
 def extract_text(text, drop=None):
     """一篇研报的全文 -> 段落列表 [{'section','text'}]。drop 累计各类被剔除内容的字数。"""
     drop = Counter() if drop is None else drop
-    segs = split_segments(text, drop)
+    segs = split_source_tail(split_segments(text, drop))
     cut = find_disclaimer_start(segs)
     if cut is not None:
         drop['disclaimer'] += sum(nchars(s['text']) for s in segs[cut:])
@@ -452,12 +471,65 @@ def process_file(path, root):
     """返回 (状态, 元数据, 段落列表, 剔除字数, 原文字数)；状态为 ok / empty（空文件、扫描件、乱码、外文研报）。"""
     text, _ = read_text(path)
     total = nchars(text)
-    meta = {'file': path.relative_to(root).as_posix()}
     if len(CJK_RE.findall(text)) < MIN_REPORT_CJK:
-        return 'empty', meta, [], Counter(), total
+        return 'empty', {'file': path.relative_to(root).as_posix()}, [], Counter(), total
     drop = Counter()
     paras = extract_text(text, drop)
     return 'ok', parse_meta(path, root, text), paras, drop, total
+
+
+# ==================== 多进程 ====================
+
+MAX_POOL = 60  # Windows 上一个进程池最多等待 63 个句柄，进程数超过约 60 会报错
+CHUNK = 16  # 每次交给一个进程的文件数：太小进程间通信开销大，太大进度条不平滑
+
+
+def default_workers():
+    n = os.cpu_count() or 1
+    return min(n, MAX_POOL) if os.name == 'nt' else n
+
+
+def _init_worker(root):
+    global _ROOT
+    _ROOT = root
+
+
+def _work(path):
+    """在子进程里处理一篇，返回 (process_file 的结果, 错误信息)；单个文件出错（读不了、格式异常）只记下来，不影响其他文件。"""
+    try:
+        return process_file(path, _ROOT), None
+    except Exception as e:
+        return None, f'{type(e).__name__}: {e}'
+
+
+def run_files(files, root, workers):
+    """按 files 的顺序逐篇给出 (文件, 结果, 错误信息)；workers > 1 时用进程池并行，结果仍按原顺序返回。"""
+    if workers <= 1:
+        _init_worker(root)
+        for f in files:
+            yield (f, *_work(f))
+        return
+    with mp.Pool(workers, initializer=_init_worker, initargs=(root,)) as pool:
+        for f, (res, err) in zip(files, pool.imap(_work, files, chunksize=CHUNK)):
+            yield f, res, err
+
+
+def reports_table_path(paras_path):
+    """段落表对应的研报元数据表路径：文件名里的 paragraphs 换成 reports（没有这个词就在后面加 _reports）。"""
+    p = Path(paras_path)
+    stem = p.stem.replace('paragraphs', 'reports') if 'paragraphs' in p.stem else p.stem + '_reports'
+    return p.with_name(stem + '.parquet')
+
+
+def report_row(f, root, status, meta=None, n_paragraphs=0, n_chars=0):
+    """元数据表的一行；没有正文或读取失败的文件只有 report_id、file、date、status。"""
+    meta = meta or {}
+    parts = f.relative_to(root).parts[:-1]
+    year = re.search(r'(?:19|20)\d{2}', root.name)
+    date = year.group(0) + parts[-2] + parts[-1] if year and len(parts) >= 2 and parts[-2].isdigit() and parts[-1].isdigit() else ''
+    return {'report_id': f.stem, 'file': f.relative_to(root).as_posix(), 'date': meta.get('date') or date,
+            **{k: meta.get(k, False if k == 'is_stock_report' else '') for k in META_COLUMNS if k != 'date'},
+            'status': status, 'n_paragraphs': n_paragraphs, 'n_chars': n_chars}
 
 
 def sample_files(files, limit, seed):
@@ -506,9 +578,10 @@ def progress(total):
         return SimpleBar(total)
 
 
-def main(txt_dir, out_path, limit=None, seed=0):
+def main(txt_dir, out_path, limit=None, seed=0, workers=None):
     """txt_dir 下的所有 .txt -> out_path（parquet，每行一个段落），同时在旁边写一份 .txt 便于人工检查抽取效果。
-    limit：只跨月份随机抽这么多篇（固定种子 seed，可复现），None 为全部。"""
+    limit：只跨月份随机抽这么多篇（固定种子 seed，可复现），None 为全部。
+    workers：并行的进程数，None 为用满 CPU 核心（见 default_workers），1 为不开子进程。"""
     for stream in (sys.stdout, sys.stderr):  # 输出被重定向时 Windows 默认用本地编码，写中文会出错
         if not stream.isatty() and hasattr(stream, 'reconfigure'):
             stream.reconfigure(encoding='utf-8', errors='replace')
@@ -518,9 +591,11 @@ def main(txt_dir, out_path, limit=None, seed=0):
         raise SystemExit(f'{root} 下没有 .txt 文件')
     if limit:
         files = sample_files(files, limit, seed)
+    workers = max(1, min(workers or default_workers(), len(files) // CHUNK or 1))  # 文件很少时不必开那么多进程
+    print(f'{len(files)} 个文件，{workers} 个进程并行' if workers > 1 else f'{len(files)} 个文件，单进程')
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_parquet, tmp_preview = out_path.with_name(out_path.name + '.tmp'), out_path.with_suffix('.txt.tmp')
-    status, drop, failed = Counter(), Counter(), []
+    status, drop, failed, report_rows, analyst_pairs = Counter(), Counter(), [], [], {}
     total_chars = kept_chars = n_paras = 0
     filled = Counter()
     rows, t0 = [], time.time()
@@ -528,26 +603,33 @@ def main(txt_dir, out_path, limit=None, seed=0):
     bar = progress(len(files))
     try:
         with open(tmp_preview, 'w', encoding='utf-8') as preview:
-            for f in files:
-                try:
-                    st, meta, paras, d, total = process_file(f, root)
-                except Exception as e:  # 单个文件出错（读不了、格式异常）记下来继续
-                    failed.append((f.relative_to(root).as_posix(), f'{type(e).__name__}: {e}'))
+            for f, res, err in run_files(files, root, workers):
+                if err:  # 单个文件出错（读不了、格式异常）记下来继续
+                    failed.append((f.relative_to(root).as_posix(), err))
                     status['failed'] += 1
+                    report_rows.append(report_row(f, root, 'failed'))
                     bar.update()
                     continue
+                st, meta, paras, d, total = res
                 status[st] += 1
                 total_chars += total
                 drop.update(d)
                 if st == 'ok' and not paras:
                     status['ok_no_paragraph'] += 1
+                report_rows.append(report_row(f, root, st if paras or st != 'ok' else 'empty', meta, len(paras),
+                                              sum(nchars(p['text']) for p in paras)))
+                if meta.get('analyst_pairs'):
+                    analyst_pairs[f.stem] = meta['analyst_pairs']
                 if paras:
                     rid = f.stem
-                    filled.update(k for k in ('date', 'broker', 'company', 'stock_code', 'title') if meta.get(k))
+                    filled.update(k for k in ('date', 'broker', 'company', 'stock_code', 'analysts', 'analyst_ids', 'is_stock_report')
+                                  if meta.get(k))
+                    filled['type_' + meta['report_type']] += 1
                     filled['reports'] += 1
                     preview.write(f'########## {rid} {meta["date"]} {meta["broker"]} {meta["company"]} {meta["stock_code"]} {meta["file"]}\n')
                     for i, p in enumerate(paras, 1):
-                        rows.append({'report_id': rid, 'para_id': i, **meta, 'page': None, 'section': p['section'], 'text': p['text']})
+                        rows.append({'report_id': rid, 'para_id': i, **{k: meta[k] for k in PARA_META}, 'page': None,
+                                     'section': p['section'], 'text': p['text']})
                         preview.write(f'[{i}] 〔{p["section"]}〕 {p["text"]}\n')
                         kept_chars += nchars(p['text'])
                     n_paras += len(paras)
@@ -560,13 +642,37 @@ def main(txt_dir, out_path, limit=None, seed=0):
     finally:
         writer.close()
         bar.close()
+    # 全部处理完后，用其他研报里认出的对应关系再补一遍：有编号没有姓名的分析师；纯文本里没有代码或公司名的个股研报
+    # （公司和代码同步到段落表；预览 txt 每篇开头那一行不再改，仍是补之前的）
+    fill_analysts(report_rows, analyst_pairs)
+    changed = set(fill_stocks(report_rows, lambda r: read_text(root / r['file'])[0]))
+    if changed:
+        info = {r['report_id']: r for r in report_rows if r['report_id'] in changed}
+        paras = pq.read_table(tmp_parquet)
+        rids = paras['report_id'].to_pylist()
+        for col in ('company', 'stock_code'):
+            old = paras[col].to_pylist()
+            paras = paras.set_column(paras.schema.get_field_index(col), col,
+                                     pa.array([info[rid][col] if rid in info else v for rid, v in zip(rids, old)], pa.string()))
+        pq.write_table(paras, tmp_parquet)
     tmp_parquet.replace(out_path)
     tmp_preview.replace(out_path.with_suffix('.txt'))
+    table_path = reports_table_path(out_path)
+    table = pa.Table.from_pylist(report_rows, REPORT_SCHEMA)
+    pq.write_table(table, table_path)
+    with open(table_path.with_suffix('.csv'), 'w', encoding='utf-8-sig', newline='') as fh:  # 带 BOM，Excel 直接打开不乱码
+        w = csv.writer(fh)
+        w.writerow(REPORT_SCHEMA.names)
+        w.writerows([r[k] for k in REPORT_SCHEMA.names] for r in report_rows)
     err_path = out_path.with_name(out_path.stem + '_errors.txt')
     if failed:
         err_path.write_text(''.join(f'{f}\t{e}\n' for f, e in failed), encoding='utf-8')
 
     n_rep = filled['reports']
+    done = [r for r in report_rows if r['status'] == 'ok']
+    for k in ('stock_code', 'is_stock_report', 'analysts'):  # 补过之后重新数
+        filled[k] = sum(bool(r[k]) for r in done)
+    stock_known = sum(bool(r['stock_code']) for r in done if r['is_stock_report'])
     print(f'\n===== 完成：用时 {time.time() - t0:.0f} 秒 =====')
     print(f'文件 {len(files)} 篇：有正文 {n_rep} 篇，空文件/扫描件/乱码/外文 {status["empty"]} 篇，'
           f'有中文但没留下段落 {status["ok_no_paragraph"]} 篇，读取失败 {status["failed"]} 篇'
@@ -576,7 +682,12 @@ def main(txt_dir, out_path, limit=None, seed=0):
                                   for k, name in DROP_NAMES.items() if drop[k]))
     other = total_chars - kept_chars - sum(drop.values())
     print(f'空文件等未抽取的字数及拼接、截断误差 {other}（{other / max(total_chars, 1):.1%}）')
-    print('元数据填充率（有正文的研报中）：' + '，'.join(f'{k} {filled[k] / max(n_rep, 1):.1%}'
-                                         for k in ('date', 'broker', 'company', 'stock_code', 'title')))
+    print('元数据填充率（有正文的研报中）：' + '，'.join(
+        f'{name} {filled[k] / max(n_rep, 1):.1%}' for k, name in (('date', '发布日期'), ('broker', '券商'), ('stock_code', '公司和代码'),
+                                                              ('analysts', '分析师姓名'), ('analyst_ids', '执业证书编号'))))
+    print('报告类型：' + '，'.join(f'{k[5:]} {v}' for k, v in filled.most_common() if k.startswith('type_'))
+          + f'；个股公司研报 {filled["is_stock_report"]} 篇（{filled["is_stock_report"] / max(n_rep, 1):.1%}），'
+          f'其中认出是哪只股票的 {stock_known} 篇（{stock_known / max(filled["is_stock_report"], 1):.1%}）')
     print(f'已写入 {out_path}（预览：{out_path.with_suffix(".txt").name}）')
+    print(f'研报元数据表 {table_path}（{len(report_rows)} 行，另有同名 .csv），和段落表用 report_id 对应')
 

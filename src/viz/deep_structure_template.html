@@ -1,0 +1,540 @@
+<!doctype html>
+<!--
+深度报告概念图结构页面的模板：src/viz/plot_deep_structure.py 把数据（JSON）替换进 __DATA__，写到 <输出目录>/深度报告结构.html。
+上面两排直方图：第一排是各篇的源汇比、唯一有向路径数（对数分箱）、平均路径长度的分布，第二排是每家公司这三个指标的
+平均值的分布（可只看研报多的公司），点柱子筛选明细表；明细表点一行，
+下面画出这一篇的结构图：只有文中的概念和连边，从左到右按“从源点出发的最长步数”分列，源点蓝色、汇点橙色。
+不依赖外部库，离线可看。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>深度报告结构</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #fcfcfb; --panel: #ffffff; --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7a7974;
+  --line: #e4e3df; --grid: #eeede9; --axis: #b9b8b2; --series-1: #2a78d6; --series-1-hover: #1f62b3; --ref: #52514e;
+  --src: #2a78d6; --snk: #eb6834; --edge: #a3a29c; --edge-hl: #3d3c39; --row-hover: #f4f3f0; --row-sel: #e7f0fb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface: #1a1a19; --panel: #222220; --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --line: #34332f; --grid: #2c2b28; --axis: #5a5953; --series-1: #3987e5; --series-1-hover: #64a2ee; --ref: #c3c2b7;
+    --src: #3987e5; --snk: #d95926; --edge: #6c6b65; --edge-hl: #e4e3dc; --row-hover: #2a2a27; --row-sel: #1d2f45;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #1a1a19; --panel: #222220; --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+  --line: #34332f; --grid: #2c2b28; --axis: #5a5953; --series-1: #3987e5; --series-1-hover: #64a2ee; --ref: #c3c2b7;
+  --src: #3987e5; --snk: #d95926; --edge: #6c6b65; --edge-hl: #e4e3dc; --row-hover: #2a2a27; --row-sel: #1d2f45;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface); color: var(--text-primary);
+  font: 14px/1.55 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 20px 20px 48px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0; }
+.sub { color: var(--text-secondary); font-size: 13px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 18px 0 4px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.tile .k { color: var(--text-secondary); font-size: 12px; }
+.tile .v { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.25; }
+.tile .d { color: var(--text-muted); font-size: 12px; }
+.sechead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin: 26px 0 -6px; }
+h2.sec { font-size: 16px; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 12px; margin-top: 16px; min-width: 0; }
+.take { color: var(--text-secondary); font-size: 13px; margin: 2px 0 6px; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { fill: var(--text-secondary); font-size: 11px; }
+.chart .tick { fill: var(--text-muted); font-variant-numeric: tabular-nums; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart .axis { stroke: var(--axis); stroke-width: 1; }
+.chart .bar { fill: var(--series-1); }
+.chart .bin:hover .bar, .chart .bin.on .bar { fill: var(--series-1-hover); }
+.chart .bin { cursor: pointer; }
+.chart .hit { fill: transparent; }
+.chart .ref { stroke: var(--ref); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.chart .reftext { fill: var(--ref); font-size: 11px; }
+.tip { position: absolute; pointer-events: none; background: var(--panel); color: var(--text-primary); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.5; box-shadow: 0 4px 14px rgba(0,0,0,.14);
+  max-width: 360px; display: none; z-index: 10; }
+.tip b { font-weight: 600; }
+.tip .m { color: var(--text-secondary); }
+.tblhead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.tblhead .ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+input, select, button { font: inherit; font-size: 13px; color: var(--text-primary); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--axis); }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; background: var(--row-sel); border-radius: 999px; padding: 2px 4px 2px 10px; }
+.chip button { border: 0; background: transparent; padding: 0 6px; font-size: 13px; line-height: 1.4; }
+.shown { color: var(--text-muted); font-size: 12px; margin-left: auto; }
+.tablewrap { overflow: auto; max-height: 440px; margin-top: 8px; border-top: 1px solid var(--line); }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th { color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; background: var(--panel); cursor: pointer; user-select: none; z-index: 1; }
+th:hover { color: var(--text-primary); }
+th:nth-child(-n+2), td:nth-child(-n+2) { text-align: left; }
+tbody tr { cursor: pointer; }
+tbody tr:hover td { background: var(--row-hover); }
+tbody tr.sel td { background: var(--row-sel); }
+td .was { color: var(--text-muted); font-size: 11px; margin-left: 4px; }
+.ghead { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 8px 16px; }
+.tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.legend { font-size: 12px; color: var(--text-secondary); display: flex; gap: 12px; flex-wrap: wrap; }
+.legend .sw { display: inline-block; width: 14px; height: 11px; border-radius: 3px; border: 1.5px solid; vertical-align: -1px; margin-right: 4px; }
+.graphwrap { overflow: auto; max-height: 78vh; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+#g svg { display: block; }
+#g text { font-size: 11.5px; fill: var(--text-primary); pointer-events: none; }
+.node rect { stroke-width: 1.5; }
+.node { cursor: default; }
+.node.src rect { stroke: var(--src); fill: color-mix(in srgb, var(--src) 14%, var(--panel)); }
+.node.snk rect { stroke: var(--snk); fill: color-mix(in srgb, var(--snk) 14%, var(--panel)); }
+.node.mid rect { stroke: var(--axis); fill: var(--panel); }
+.edge { fill: none; stroke: var(--edge); opacity: .6; }
+.arrow { fill: var(--edge); }
+.arrow-hl { fill: var(--edge-hl); }
+svg.focus .edge { opacity: .07; }
+svg.focus .node { opacity: .22; }
+svg.focus .edge.hl { opacity: 1; stroke: var(--edge-hl); }
+svg.focus .node.hl { opacity: 1; }
+svg.focus .node.me rect { stroke-width: 2.5; }
+.hint { color: var(--text-muted); font-size: 12px; margin-top: 6px; }
+.defs { color: var(--text-secondary); font-size: 13px; margin-top: 18px; }
+.defs dt { font-weight: 600; color: var(--text-primary); margin-top: 6px; }
+.defs dd { margin: 0; }
+.empty { color: var(--text-muted); padding: 24px; text-align: center; }
+@media (max-width: 640px) { .wrap { padding: 16px; } .tile .v { font-size: 22px; } .shown { margin-left: 0; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>深度报告概念图结构</h1>
+  <div class="sub" id="sub"></div>
+  <div class="tiles" id="tiles"></div>
+
+  <div class="sechead"><h2 class="sec">每篇研报</h2><span class="sub" id="r-note"></span></div>
+  <div class="grid3">
+    <div class="card"><h2>源汇比（源点数 ÷ 汇点数）</h2><div class="take" id="t-ratio"></div><div class="chart" id="h-ratio"></div></div>
+    <div class="card"><h2>唯一有向路径数</h2><div class="take" id="t-paths"></div><div class="chart" id="h-paths"></div></div>
+    <div class="card"><h2>平均路径长度（条边）</h2><div class="take" id="t-mean"></div><div class="chart" id="h-mean"></div></div>
+  </div>
+
+  <div class="sechead">
+    <h2 class="sec">每家公司的平均值</h2>
+    <select id="cmin" aria-label="只看研报篇数不少于这个数的公司">
+      <option value="1">全部公司</option><option value="2">有 2 篇以上的公司</option>
+      <option value="3">有 3 篇以上的公司</option><option value="5">有 5 篇以上的公司</option>
+    </select>
+    <span class="sub" id="c-note"></span>
+  </div>
+  <div class="grid3">
+    <div class="card"><h2>公司平均源汇比</h2><div class="take" id="tc-ratio"></div><div class="chart" id="hc-ratio"></div></div>
+    <div class="card"><h2>公司平均唯一有向路径数</h2><div class="take" id="tc-paths"></div><div class="chart" id="hc-paths"></div></div>
+    <div class="card"><h2>公司平均的平均路径长度（条边）</h2><div class="take" id="tc-mean"></div><div class="chart" id="hc-mean"></div></div>
+  </div>
+
+  <div class="card">
+    <div class="tblhead">
+      <h2>明细表</h2>
+      <div class="ctl">
+        <input id="q" type="search" placeholder="搜索公司、券商" aria-label="搜索公司、券商">
+        <select id="co" aria-label="按公司筛选"></select>
+        <span id="chip"></span>
+      </div>
+      <span class="shown" id="shown"></span>
+    </div>
+    <div class="tablewrap"><table id="tbl"></table></div>
+  </div>
+
+  <div class="card" id="gcard">
+    <div class="ghead">
+      <div><h2 id="gtitle"></h2><div class="take" id="gmeta"></div></div>
+      <div class="tools">
+        <span class="legend">
+          <span><span class="sw" style="border-color:var(--src);background:color-mix(in srgb,var(--src) 14%,var(--panel))"></span>源点（只作原因）</span>
+          <span><span class="sw" style="border-color:var(--snk);background:color-mix(in srgb,var(--snk) 14%,var(--panel))"></span>汇点（只作结果）</span>
+          <span><span class="sw" style="border-color:var(--axis);background:var(--panel)"></span>中间概念</span>
+        </span>
+        <button id="zo" title="缩小">−</button><button id="zf">适应宽度</button><button id="zi" title="放大">＋</button>
+      </div>
+    </div>
+    <div class="graphwrap" id="gwrap"><div id="g"></div></div>
+    <div class="hint">从左到右按“从源点出发的最长步数”分列；鼠标停在概念上，突出它的全部上游和下游，并显示经过它的完整路径条数。
+      名称是按公司内统一后的名称，悬停可看合并了哪些原名。</div>
+  </div>
+
+  <dl class="defs">
+    <dt>样本</dt>
+    <dd id="d-sample"></dd>
+    <dt>源点 / 汇点 / 源汇比</dt>
+    <dd>源点：没有入边的概念（只作原因）；汇点：没有出边的概念（只作结果）。源汇比 = 源点数 ÷ 汇点数，大于 1 表示多个原因收敛到较少的结论，小于 1 表示少数原因发散出较多结果。</dd>
+    <dt>唯一有向路径数</dt>
+    <dd>从源点出发、沿箭头走到汇点的不同路径条数（经过的概念序列不同就算不同的路径），即这篇研报里完整的因果链条数；用动态规划计数。直方图横轴对数分箱，每十倍分 6 档（边界 1、1.5、2、3、5、7、10、15、20……，只取整数）。</dd>
+    <dt>平均路径长度</dt>
+    <dd>这篇所有完整路径的平均边数（每条路径权重相同；长度 1 表示源点直接指向汇点）。表里另列中位数和最长路径。</dd>
+    <dt>每家公司的平均值</dt>
+    <dd>把一家公司各篇深度报告的三个指标分别取算术平均，看公司之间的分布；只有 1 篇的公司就是那一篇的值，可以用下拉框只看研报多的公司。
+      横轴分箱和每篇研报的直方图一样，方便对比两者的离散程度；点柱子时明细表只看这一档公司的研报。
+      组内相关系数 ICC（只用有 2 篇以上的公司）：同一公司不同研报的指标有多相似，0 表示公司之间的差别不比随机分组大，1 表示同一公司各篇完全一样；
+      用单因素方差分析的 ICC(1)，路径数先取 log10。</dd>
+    <dt>统一前</dt>
+    <dd>表中灰色小字：同样的指标在各篇原始概念名的图上的值（只在和统一后不同时显示）。统一后同一篇里两个概念合成一个时若出现环，按引文数从少到多删边去环。</dd>
+  </dl>
+</div>
+<div class="tip" id="tip"></div>
+<script>
+const DATA = __DATA__;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const fmt = n => n == null ? '—' : Number(n).toLocaleString('zh-CN');
+const f2 = x => x == null ? '—' : x.toFixed(2);
+const fmtDate = d => d && d.length === 8 ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}` : (d || '');
+const short = r => `${r.company} · ${r.broker.replace(/证券$/, '')} ${fmtDate(r.date).slice(5)}`;
+const median = xs => { const s = xs.filter(x => x != null).sort((a, b) => a - b), n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : null; };
+const R = DATA.reports;
+const byId = new Map(R.map(r => [r.rid, r]));
+
+// ---------- 抬头 ----------
+const nCo = new Set(R.map(r => r.code)).size, nUni = R.filter(r => r.unified).length;
+const perCo = R.reduce((m, r) => m.set(r.code, (m.get(r.code) || 0) + 1), new Map());
+const nSolo = R.filter(r => perCo.get(r.code) === 1).length;  // 公司只有这一篇：没有可统一的，名称不变
+const u = DATA.unify || {};
+$('sub').textContent = `${R.length} 篇深度报告、${nCo} 家公司 · ${nUni === R.length ? '全部' : nUni + ' 篇'}按公司内统一后的名称计算` +
+  (u.n_groups != null ? `（各公司内不同名称 ${fmt(u.n_terms)} → ${fmt(u.n_terms_after)} 个，合并 ${fmt(u.n_groups)} 组）` : '') +
+  (nSolo ? `；其中 ${nSolo} 篇所在公司只有这一篇，名称不变` : '') + ` · 本页生成于 ${DATA.generated}`;
+$('d-sample').textContent = `概念 DAG 输出目录里的全部 ${R.length} 篇深度报告（${nCo} 家公司）。每篇一张图：只用进图的边（文中的概念和连边，没有补全），` +
+  `按公司内统一后的名称改写（只统一有 2 篇以上的公司，${nSolo} 篇所在公司只有一篇，名称不变），同一篇里改写后重复的边合并；没有边的孤立概念不算。` +
+  (nUni < R.length ? `其中 ${R.length - nUni} 篇没有统一结果，用原始名称。` : '');
+const M = {
+  ratio: {label: '源汇比', get: r => r.a.ratio, show: f2},
+  paths: {label: '唯一有向路径数', get: r => r.a.n_paths, show: fmt},
+  mean: {label: '平均路径长度', get: r => r.a.len_mean, show: f2},
+};
+const vals = k => R.map(M[k].get).filter(v => v != null);
+const tile = (k, v, d) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
+const rng = (k, f) => { const v = vals(k); return v.length ? `范围 ${f(Math.min(...v))} – ${f(Math.max(...v))}` : ''; };
+$('tiles').innerHTML = [
+  tile('研报', fmt(R.length) + ' 篇', `${nCo} 家公司；进图概念中位数 ${fmt(median(R.map(r => r.a.n_nodes)))} 个、边 ${fmt(median(R.map(r => r.a.n_edges)))} 条`),
+  tile('源汇比中位数', f2(median(vals('ratio'))), `${rng('ratio', f2)}，${vals('ratio').filter(x => x > 1).length} 篇大于 1`),
+  tile('唯一有向路径数中位数', fmt(Math.round(median(vals('paths')))), rng('paths', fmt) + ' 条'),
+  tile('平均路径长度中位数', f2(median(vals('mean'))), rng('mean', f2) + ' 条边'),
+].join('');
+$('t-ratio').textContent = `中位数 ${f2(median(vals('ratio')))}：${vals('ratio').filter(x => x > 1).length} 篇源点多于汇点，${vals('ratio').filter(x => x < 1).length} 篇少于汇点。虚线是源点 = 汇点。`;
+$('t-paths').textContent = `中位数 ${fmt(Math.round(median(vals('paths'))))} 条，${rng('paths', fmt)}；横轴对数分箱（每十倍 6 档）。`;
+$('t-mean').textContent = `中位数 ${f2(median(vals('mean')))} 条边，${rng('mean', f2)}。`;
+
+// ---------- 悬停提示 ----------
+const tip = $('tip');
+function showTip(ev, html) {
+  tip.innerHTML = html; tip.style.display = 'block';
+  const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = ev.pageX + pad, y = ev.pageY + pad;
+  if (x + w > window.scrollX + document.documentElement.clientWidth - 8) x = ev.pageX - w - pad;
+  if (y + h > window.scrollY + window.innerHeight - 8) y = ev.pageY - h - pad;
+  tip.style.left = Math.max(window.scrollX + 4, x) + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.style.display = 'none'; };
+
+// ---------- 分箱 ----------
+function niceStep(x) {
+  if (!(x > 0)) return 0.5;
+  const mag = Math.pow(10, Math.floor(Math.log10(x))), r = x / mag;
+  return (r <= 1 ? 1 : r <= 2 ? 2 : r <= 2.5 ? 2.5 : r <= 5 ? 5 : 10) * mag;
+}
+const trim = v => +v.toFixed(6);
+// 横轴（分箱边界）只按每篇研报的值定一次，公司平均值的直方图用同一套边界
+function linearAxis(v, {from = null, target = 10} = {}) {
+  const lo0 = from ?? Math.min(...v), hi0 = Math.max(...v), step = niceStep((hi0 - lo0) / target);
+  const lo = Math.floor(lo0 / step) * step, n = Math.max(1, Math.floor((hi0 - lo) / step) + 1);
+  const edges = Array.from({length: n + 1}, (_, i) => trim(lo + i * step));
+  const index = x => Math.min(n - 1, Math.max(0, Math.floor((x - lo) / step + 1e-9)));
+  return {edges, log: false, index, pos: x => { const i = index(x); return i + (x - edges[i]) / step; }};
+}
+function logAxis(v) {  // 分箱边界取 1、1.5、2、3、5、7、10、15……（只取整数），从不超过最小值的那个开始
+  const lo = Math.min(...v), hi = Math.max(...v, 1), edges = [];
+  if (lo < 1) edges.push(0);
+  for (let e = 0; edges[edges.length - 1] === undefined || edges[edges.length - 1] <= hi; e++)
+    for (const m of [1, 1.5, 2, 3, 5, 7]) {
+      const x = m * Math.pow(10, e);
+      if (!Number.isInteger(x)) continue;
+      if (edges.length && edges[edges.length - 1] >= 1 && x <= lo) edges[edges.length - 1] = x; else edges.push(x);
+      if (x > hi) break;
+    }
+  const n = edges.length - 1;
+  const index = x => { const i = edges.findIndex((e, j) => j < n && x >= e && x < edges[j + 1]); return i >= 0 ? i : x < edges[0] ? 0 : n - 1; };
+  const lg = x => Math.log10(Math.max(x, 1e-9));
+  return {edges, log: true, index, pos: x => {
+    const j = index(x), a = edges[j], b = edges[j + 1];
+    return j + (a <= 0 ? (x - a) / (b - a) : (lg(Math.min(Math.max(x, a), b)) - lg(a)) / (lg(b) - lg(a)));
+  }};
+}
+function binsFor(axis, items, get, intData) {
+  const bins = axis.edges.slice(0, -1).map((lo, i) => ({lo, hi: axis.edges[i + 1], items: []}));
+  items.forEach(it => { const x = get(it); if (x != null) bins[axis.index(x)].items.push(it); });
+  bins.forEach(b => {
+    b.label = !axis.log ? `${b.lo}–${b.hi}` : !intData ? `${fmt(b.lo)}–${fmt(b.hi)}` :
+      b.hi - b.lo === 1 ? fmt(b.lo) : `${fmt(b.lo)}–${fmt(b.hi - 1)}`;
+  });
+  return bins;
+}
+const AX = {ratio: linearAxis(vals('ratio'), {from: 0, target: 20}), paths: logAxis(vals('paths')), mean: linearAxis(vals('mean'), {target: 24})};
+
+// ---------- 每家公司的平均值 ----------
+const avg = xs => { const v = xs.filter(x => x != null); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null; };
+const CO = [...R.reduce((m, r) => m.set(r.code, [...(m.get(r.code) || []), r]), new Map())].map(([code, rs]) => ({
+  code, company: rs[0].company, n: rs.length,
+  ratio: avg(rs.map(M.ratio.get)), paths: avg(rs.map(M.paths.get)), mean: avg(rs.map(M.mean.get)),
+}));
+const SHOWC = {ratio: f2, paths: x => x == null ? '—' : (Math.round(x * 10) / 10).toLocaleString('zh-CN'), mean: f2};
+function icc(k) {  // ICC(1)：只用有 2 篇以上的公司；路径数取 log10
+  const tf = k === 'paths' ? Math.log10 : x => x;
+  const by = new Map();
+  R.forEach(r => { const x = M[k].get(r); if (x != null) by.set(r.code, [...(by.get(r.code) || []), tf(x)]); });
+  const groups = [...by.values()].filter(g => g.length > 1);
+  const N = groups.reduce((s, g) => s + g.length, 0), K = groups.length;
+  if (K < 2) return null;
+  const grand = groups.flat().reduce((s, x) => s + x, 0) / N;
+  let ssb = 0, ssw = 0;
+  groups.forEach(g => { const m = g.reduce((s, x) => s + x, 0) / g.length; ssb += g.length * (m - grand) ** 2; g.forEach(x => { ssw += (x - m) ** 2; }); });
+  const msb = ssb / (K - 1), msw = ssw / (N - K), n0 = (N - groups.reduce((s, g) => s + g.length ** 2, 0) / N) / (K - 1);
+  return {icc: (msb - msw) / (msb + (n0 - 1) * msw), K, N};
+}
+const ICC = {ratio: icc('ratio'), paths: icc('paths'), mean: icc('mean')};
+const quant = (xs, p) => { const s = xs.filter(x => x != null).sort((a, b) => a - b); if (!s.length) return null; const i = (s.length - 1) * p, lo = Math.floor(i); return s[lo] + (s[Math.min(lo + 1, s.length - 1)] - s[lo]) * (i - lo); };
+$('r-note').textContent = `${R.length} 篇，每篇一个值`;
+
+// ---------- 直方图 ----------
+let filter = null;  // {key, lo, label, test: 研报 -> 是否显示}
+function hist(el, key, spec) {
+  const {axis, bins, ref = null, refText = ''} = spec, W = Math.max(280, el.clientWidth), H = ref != null ? 224 : 210;
+  const padL = 30, padR = 8, padT = ref != null ? 38 : 24, padB = 30, plotW = W - padL - padR, plotH = H - padT - padB;
+  const maxC = Math.max(1, ...bins.map(b => b.items.length));
+  const ystep = maxC <= 6 ? 1 : Math.max(1, Math.round(niceStep(maxC / 4)));
+  const ymax = Math.ceil(maxC / ystep) * ystep, y = c => padT + plotH - plotH * c / ymax;
+  const bw = plotW / bins.length, xAt = p => padL + p * bw;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(spec.title)}分布">`;
+  for (let c = 0; c <= ymax; c += ystep)
+    s += `<line class="grid" x1="${padL}" x2="${W - padR}" y1="${y(c)}" y2="${y(c)}"/><text class="tick" x="${padL - 6}" y="${y(c) + 4}" text-anchor="end">${c}</text>`;
+  const every = [1, 2, 4, 10].find(e => e * bw >= 34) || 10;  // 隔 1、2、4 档标一个刻度，刻度落在整齐的数上
+  bins.forEach((b, i) => {
+    const c = b.items.length, x0 = xAt(i) + 1, w = Math.max(1, bw - 2), h = plotH * c / ymax, r = Math.min(4, w / 2, h);
+    const on = filter && filter.key === key && filter.lo === b.lo ? ' on' : '';
+    const bar = c ? `<path class="bar" d="M${x0},${padT + plotH} v${-(h - r)} a${r},${r} 0 0 1 ${r},${-r} h${w - 2 * r} a${r},${r} 0 0 1 ${r},${r} v${h - r} z"/>` : '';
+    s += `<g class="bin${on}" data-i="${i}"><rect class="hit" x="${xAt(i)}" y="${padT}" width="${bw}" height="${plotH}"/>${bar}</g>`;
+  });
+  // 对数分箱只在首位是 1、2、5 的边界上标刻度（两档一个；太挤时只标 10 的整次幂），线性分箱隔 every 档标一个
+  const nice = 2 * bw >= 30 ? [1, 2, 5] : [1];
+  const labelAt = (v, i) => !axis.log ? i % every === 0 :
+    v <= 0 || nice.some(m => Math.abs(v / Math.pow(10, Math.floor(Math.log10(v) + 1e-9)) - m) < 1e-6);
+  axis.edges.forEach((v, i) => {
+    if (labelAt(v, i)) s += `<text class="tick" x="${xAt(i)}" y="${H - padB + 15}" text-anchor="middle">${axis.log ? fmt(v) : v}</text>`;
+  });
+  s += `<line class="axis" x1="${padL}" x2="${W - padR}" y1="${padT + plotH}" y2="${padT + plotH}"/>`;
+  const med = median(spec.items.map(spec.get));
+  const mark = (v, text, dy) => { const x = xAt(axis.pos(v)); return `<line class="ref" x1="${x}" x2="${x}" y1="${padT - 4}" y2="${padT + plotH}"/>` +
+    `<text class="reftext" x="${Math.min(W - padR, Math.max(padL, x))}" y="${padT - 8 - dy}" text-anchor="${x > W - 60 ? 'end' : x < padL + 40 ? 'start' : 'middle'}">${esc(text)}</text>`; };
+  if (ref != null) s += mark(ref, refText, 0);  // 参考线的说明在下一行，中位数在上一行，两条线挨得近也不重叠
+  if (med != null) s += mark(med, `中位数 ${spec.show(med)}`, ref != null ? 14 : 0);
+  el.innerHTML = s + '</svg>';
+  el.querySelectorAll('.bin').forEach(g => {
+    const b = bins[+g.dataset.i];
+    g.addEventListener('mousemove', ev => {
+      const list = b.items.slice().sort((p, q) => spec.get(q) - spec.get(p));
+      showTip(ev, `<b>${esc(spec.title)} ${esc(b.label)}</b>：${b.items.length} ${spec.unit}<br>` +
+        (list.length ? `<span class="m">${list.slice(0, 8).map(it => esc(spec.name(it)) + ' ' + spec.show(spec.get(it))).join('<br>')}` +
+          (list.length > 8 ? `<br>等 ${list.length} ${spec.unit}` : '') + `<br>点击：明细表只看这一档${spec.unit === '家' ? '公司的研报' : ''}</span>` : ''));
+    });
+    g.addEventListener('mouseleave', hideTip);
+    g.addEventListener('click', () => {
+      filter = filter && filter.key === key && filter.lo === b.lo ? null : {key, lo: b.lo, label: `${spec.title} ${b.label}`, test: spec.test(b)};
+      drawHists(); renderTable();
+    });
+  });
+}
+const repSpec = k => ({axis: AX[k], items: R, get: M[k].get, show: M[k].show, title: M[k].label, unit: '篇', name: short,
+  bins: binsFor(AX[k], R, M[k].get, k === 'paths'),
+  test: b => r => { const x = M[k].get(r); return x != null && AX[k].index(x) === AX[k].index(b.lo); }});
+const coName = c => `${c.company}（${c.n} 篇）`;
+const coSpec = (k, cos) => ({axis: AX[k], items: cos, get: c => c[k], show: SHOWC[k], title: k === 'mean' ? '公司平均的平均路径长度' : `公司平均${M[k].label}`, unit: '家', name: coName,
+  bins: binsFor(AX[k], cos, c => c[k], false),
+  test: b => { const codes = new Set(b.items.map(c => c.code)); return r => codes.has(r.code); }});
+function coTakes(cos) {
+  const codes = new Set(cos.map(c => c.code)), rs = R.filter(r => codes.has(r.code));
+  $('c-note').textContent = `${cos.length} 家公司（${rs.length} 篇），每家一个值：它各篇研报的算术平均`;
+  for (const k of ['ratio', 'paths', 'mean']) {
+    const cv = cos.map(c => c[k]), rv = rs.map(M[k].get), I = ICC[k];
+    const sh = k === 'paths' ? x => fmt(Math.round(x)) : f2;
+    $('tc-' + k).textContent = `中位数 ${sh(median(cv))}，中间一半公司在 ${sh(quant(cv, .25))} – ${sh(quant(cv, .75))}` +
+      `（这些公司的各篇研报是 ${sh(quant(rv, .25))} – ${sh(quant(rv, .75))}）` +
+      (k === 'ratio' ? `；${cv.filter(x => x > 1).length} 家平均大于 1` : '') +
+      (I ? `。ICC ${I.icc.toFixed(2)}（${I.K} 家有 2 篇以上的公司）` : '') + '。';
+  }
+}
+let coSpecs = null;
+function setCoScope() {
+  const min = +$('cmin').value, cos = CO.filter(c => c.n >= min);
+  coSpecs = {ratio: {...coSpec('ratio', cos), ref: 1, refText: '源 = 汇'}, paths: coSpec('paths', cos), mean: coSpec('mean', cos)};
+  coTakes(cos);
+  if (filter && filter.key.startsWith('c-')) filter = null;  // 公司范围变了，原来的公司筛选不再对应
+}
+$('cmin').addEventListener('change', () => { setCoScope(); drawHists(); renderTable(); });
+const specs = {ratio: {...repSpec('ratio'), ref: 1, refText: '源 = 汇'}, paths: repSpec('paths'), mean: repSpec('mean')};
+setCoScope();
+function drawHists() {
+  for (const k of ['ratio', 'paths', 'mean']) {
+    hist($('h-' + k), 'r-' + k, specs[k]);
+    hist($('hc-' + k), 'c-' + k, coSpecs[k]);
+  }
+}
+
+// ---------- 明细表 ----------
+const was = (a, b, f = fmt) => b == null || a === b ? '' : `<span class="was">${f(b)}</span>`;
+const COLS = [
+  {t: '研报', v: r => r.date + r.broker, h: r => `${fmtDate(r.date)} ${esc(r.broker)}`},
+  {t: '公司', v: r => r.company, h: r => esc(r.company)},
+  {t: '正文字数', v: r => r.chars, h: r => fmt(r.chars)},
+  {t: '进图概念', v: r => r.a.n_nodes, h: r => fmt(r.a.n_nodes) + was(r.a.n_nodes, r.b.n_nodes)},
+  {t: '边', v: r => r.a.n_edges, h: r => fmt(r.a.n_edges) + was(r.a.n_edges, r.b.n_edges)},
+  {t: '源点', v: r => r.a.n_sources, h: r => fmt(r.a.n_sources)},
+  {t: '汇点', v: r => r.a.n_sinks, h: r => fmt(r.a.n_sinks)},
+  {t: '源汇比', v: r => r.a.ratio ?? -1, h: r => f2(r.a.ratio) + was(r.a.ratio, r.b.ratio, f2)},
+  {t: '唯一有向路径', v: r => r.a.n_paths, h: r => fmt(r.a.n_paths) + was(r.a.n_paths, r.b.n_paths)},
+  {t: '平均路径长度', v: r => r.a.len_mean ?? -1, h: r => f2(r.a.len_mean) + was(r.a.len_mean, r.b.len_mean, f2)},
+  {t: '中位 / 最长', v: r => r.a.len_max, h: r => `${r.a.len_median} / ${r.a.len_max}`},
+];
+let sortCol = 1, sortDir = 1, selected = null;
+const cos = [...new Map(R.map(r => [r.code, r.company])).entries()].sort((a, b) => a[1].localeCompare(b[1], 'zh'));
+$('co').innerHTML = `<option value="">全部公司（${cos.length} 家）</option>` +
+  cos.map(([c, n]) => `<option value="${esc(c)}">${esc(n)}（${R.filter(r => r.code === c).length} 篇）</option>`).join('');
+function rowsShown() {
+  const q = $('q').value.trim().toLowerCase(), co = $('co').value;
+  return R.filter(r => (!co || r.code === co) && (!q || (r.company + r.broker + r.code).toLowerCase().includes(q)) &&
+    (!filter || filter.test(r)));
+}
+function renderTable() {
+  const rows = rowsShown(), c = COLS[sortCol];
+  rows.sort((a, b) => { const x = c.v(a), y = c.v(b); return (typeof x === 'string' ? x.localeCompare(y, 'zh') : x - y) * sortDir || a.date.localeCompare(b.date); });
+  $('tbl').innerHTML = '<thead><tr>' + COLS.map((col, i) => `<th data-i="${i}">${col.t}${i === sortCol ? (sortDir > 0 ? ' ↑' : ' ↓') : ''}</th>`).join('') + '</tr></thead><tbody>' +
+    (rows.map(r => `<tr data-rid="${esc(r.rid)}"${r.rid === selected ? ' class="sel"' : ''}>${COLS.map(col => `<td>${col.h(r)}</td>`).join('')}</tr>`).join('') ||
+      `<tr><td colspan="${COLS.length}" class="empty">没有符合条件的研报</td></tr>`) + '</tbody>';
+  $('shown').textContent = `显示 ${rows.length} / ${R.length} 篇 · 点表头排序，点一行看结构图`;
+  $('chip').innerHTML = filter ? `<span class="chip">${esc(filter.label)}<button id="clr" title="清除筛选">✕</button></span>` : '';
+  if (filter) $('clr').onclick = () => { filter = null; drawHists(); renderTable(); };
+  $('tbl').querySelectorAll('th').forEach(th => th.onclick = () => {
+    const i = +th.dataset.i; if (i === sortCol) sortDir = -sortDir; else { sortCol = i; sortDir = i < 2 ? 1 : -1; } renderTable();
+  });
+  $('tbl').querySelectorAll('tbody tr[data-rid]').forEach(tr => tr.onclick = () => { select(tr.dataset.rid); $('gcard').scrollIntoView({behavior: 'smooth', block: 'start'}); });
+}
+$('q').addEventListener('input', renderTable);
+$('co').addEventListener('change', renderTable);
+
+// ---------- 结构图 ----------
+const NW = 150, NH = 22, CW = 196, RH = 28, PX = 14, PY = 14;
+let scale = 1, cur = null;
+const textW = s => [...s].reduce((w, ch) => w + (/[\u0000-ÿ]/.test(ch) ? 6.6 : 11.6), 0);
+function fit(s, w) { if (textW(s) <= w) return s; let t = ''; for (const ch of s) { if (textW(t + ch + '…') > w) break; t += ch; } return t + '…'; }
+function layout(G) {
+  const n = G.n.length, out = Array.from({length: n}, () => []), inn = Array.from({length: n}, () => []);
+  G.m.forEach(([a, b]) => { out[a].push(b); inn[b].push(a); });
+  const deg = inn.map(x => x.length), order = [], queue = [];
+  deg.forEach((d, i) => { if (!d) queue.push(i); });
+  for (let h = 0; h < queue.length; h++) { const v = queue[h]; order.push(v); out[v].forEach(w => { if (--deg[w] === 0) queue.push(w); }); }
+  const level = new Array(n).fill(0);
+  order.forEach(v => out[v].forEach(w => { level[w] = Math.max(level[w], level[v] + 1); }));
+  const up = new Array(n).fill(0), dn = new Array(n).fill(0);
+  order.forEach(v => { up[v] = inn[v].length ? inn[v].reduce((s, x) => s + up[x], 0) : 1; });
+  order.slice().reverse().forEach(v => { dn[v] = out[v].length ? out[v].reduce((s, x) => s + dn[x], 0) : 1; });
+  const L = n ? Math.max(...level) + 1 : 0, layers = Array.from({length: L}, () => []);
+  for (let v = 0; v < n; v++) layers[level[v]].push(v);
+  const pos = new Array(n);
+  const place = ly => ly.forEach((v, i) => { pos[v] = i - (ly.length - 1) / 2; });
+  layers.forEach(place);
+  const bary = (v, nb) => nb.length ? nb.reduce((s, x) => s + pos[x], 0) / nb.length : pos[v];
+  for (let it = 0; it < 12; it++) {  // 重心法排序，减少交叉：奇数轮从左往右看前驱，偶数轮从右往左看后继
+    const fwd = it % 2 === 0, seq = fwd ? layers.slice(1) : layers.slice(0, -1).reverse();
+    seq.forEach(ly => { const key = new Map(ly.map(v => [v, bary(v, fwd ? inn[v] : out[v])])); ly.sort((a, b) => key.get(a) - key.get(b) || pos[a] - pos[b]); place(ly); });
+  }
+  return {n, out, inn, level, layers, pos, up, dn, total: order.filter(v => !inn[v].length).reduce((s, v) => s + dn[v], 0)};
+}
+function reach(adj, v) { const seen = new Set([v]), st = [v]; while (st.length) adj[st.pop()].forEach(w => { if (!seen.has(w)) { seen.add(w); st.push(w); } }); return seen; }
+const KIND = ['指标', '事件', '状态'];
+function drawGraph(r) {
+  const G = r.g, Lg = layout(G), maxRows = Math.max(1, ...Lg.layers.map(l => l.length));
+  const W = PX * 2 + Math.max(1, Lg.layers.length) * CW - (CW - NW), H = PY * 2 + maxRows * RH;
+  const X = v => PX + Lg.level[v] * CW, Y = v => PY + ((maxRows - 1) / 2 + Lg.pos[v]) * RH;
+  let s = `<svg id="gsvg" viewBox="0 0 ${W} ${H}" width="${W * scale}" height="${H * scale}" role="img" aria-label="${esc(short(r))} 概念结构图">` +
+    `<defs><marker id="ar" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow" d="M0,0 L8,4 L0,8 z"/></marker>` +
+    `<marker id="arh" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path class="arrow-hl" d="M0,0 L8,4 L0,8 z"/></marker></defs><g id="edges">`;
+  G.m.forEach(([a, b, sup], i) => {
+    const x1 = X(a) + NW, y1 = Y(a) + NH / 2, x2 = X(b), y2 = Y(b) + NH / 2, c = Math.max(28, (x2 - x1) * 0.45);
+    s += `<path class="edge" data-i="${i}" d="M${x1},${y1} C${x1 + c},${y1} ${x2 - c},${y2} ${x2 - 1},${y2}" stroke-width="${1 + 0.45 * Math.min(sup - 1, 3)}" marker-end="url(#ar)"/>`;
+  });
+  s += '</g><g id="nodes">';
+  for (let v = 0; v < Lg.n; v++) {
+    const cls = !Lg.inn[v].length ? 'src' : !Lg.out[v].length ? 'snk' : 'mid';
+    s += `<g class="node ${cls}" data-v="${v}" transform="translate(${X(v)},${Y(v)})"><rect width="${NW}" height="${NH}" rx="5"/>` +
+      `<text x="7" y="${NH / 2 + 4}">${esc(fit(G.n[v], NW - 12))}</text></g>`;
+  }
+  $('g').innerHTML = s + '</g></svg>';
+  if (Lg.total !== r.a.n_paths) console.warn('路径数不一致', r.rid, Lg.total, r.a.n_paths);
+  const svg = $('gsvg'), edgeEls = [...svg.querySelectorAll('.edge')], nodeEls = [...svg.querySelectorAll('.node')];
+  nodeEls.forEach(el => {
+    const v = +el.dataset.v;
+    el.addEventListener('mouseenter', () => {
+      const anc = reach(Lg.inn, v), desc = reach(Lg.out, v);
+      svg.classList.add('focus');
+      nodeEls.forEach(x => { const w = +x.dataset.v; x.classList.toggle('hl', anc.has(w) || desc.has(w)); x.classList.toggle('me', w === v); });
+      edgeEls.forEach(x => { const [a, b] = G.m[+x.dataset.i]; const on = (anc.has(a) && anc.has(b)) || (desc.has(a) && desc.has(b));
+        x.classList.toggle('hl', on); x.setAttribute('marker-end', on ? 'url(#arh)' : 'url(#ar)'); });
+    });
+    el.addEventListener('mousemove', ev => {
+      const thru = Lg.up[v] * Lg.dn[v], al = G.al[String(v)];
+      showTip(ev, `<b>${esc(G.n[v])}</b><br><span class="m">${KIND[G.k[v]] || ''} · 入边 ${Lg.inn[v].length} 条、出边 ${Lg.out[v].length} 条 · ` +
+        `上游 ${reach(Lg.inn, v).size - 1} 个、下游 ${reach(Lg.out, v).size - 1} 个概念<br>经过它的完整路径 ${fmt(thru)} 条（占 ${(100 * thru / Math.max(1, Lg.total)).toFixed(1)}%）` +
+        (al ? `<br>合并了原名：${esc(al.join('、'))}` : '') + '</span>');
+    });
+    el.addEventListener('mouseleave', () => {
+      hideTip(); svg.classList.remove('focus');
+      nodeEls.forEach(x => x.classList.remove('hl', 'me'));
+      edgeEls.forEach(x => { x.classList.remove('hl'); x.setAttribute('marker-end', 'url(#ar)'); });
+    });
+  });
+  return {W, H};
+}
+function setScale(s2) {
+  scale = Math.min(2, Math.max(0.3, s2));
+  const svg = $('gsvg'); if (!svg || !cur) return;
+  svg.setAttribute('width', cur.W * scale); svg.setAttribute('height', cur.H * scale);
+}
+const fitScale = () => cur ? Math.min(1, ($('gwrap').clientWidth - 4) / cur.W) : 1;
+let autoFit = true;  // 没手动缩放时，窗口大小变了自动适应宽度
+$('zo').onclick = () => { autoFit = false; setScale(scale / 1.25); };
+$('zi').onclick = () => { autoFit = false; setScale(scale * 1.25); };
+$('zf').onclick = () => { autoFit = true; setScale(Math.max(0.55, fitScale())); };
+function select(rid) {
+  const r = byId.get(rid); if (!r) return;
+  selected = rid;
+  $('tbl').querySelectorAll('tbody tr').forEach(tr => tr.classList.toggle('sel', tr.dataset.rid === rid));
+  $('gtitle').textContent = `${r.company} · ${r.broker} · ${fmtDate(r.date)}`;
+  const a = r.a;
+  $('gmeta').textContent = `正文 ${fmt(r.chars)} 字（${r.chunks} 块）· 进图概念 ${a.n_nodes} 个、边 ${a.n_edges} 条 · 源点 ${a.n_sources}、汇点 ${a.n_sinks}（源汇比 ${f2(a.ratio)}）· ` +
+    `唯一有向路径 ${fmt(a.n_paths)} 条 · 平均长度 ${f2(a.len_mean)}、最长 ${a.len_max} 条边` + (r.unified ? '' : ' · 没有统一结果，用原始名称');
+  const keep = scale; scale = 1; cur = drawGraph(r); setScale(autoFit ? Math.max(0.55, fitScale()) : keep);
+}
+
+// ---------- 初始 ----------
+drawHists();
+renderTable();
+const medP = median(vals('paths'));
+if (R.length) select(R.slice().sort((p, q) => Math.abs(p.a.n_paths - medP) - Math.abs(q.a.n_paths - medP))[0].rid);
+let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { drawHists(); if (autoFit) setScale(Math.max(0.55, fitScale())); }, 120); });
+</script>
+</body>
+</html>

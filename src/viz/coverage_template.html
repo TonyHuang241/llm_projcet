@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>研报概念数据进度</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f3f3f1;
+  --surface: #fcfcfb;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --muted: #7a7975;
+  --border: #e4e3df;
+  --track: #e8e7e3;
+  --s1: #2a78d6;
+  --s1-soft: #cde2fb;
+  --good: #0ca30c;
+  --warn: #e39a00;
+  --none: #a9a8a3;
+  --callout: #eef4fc;
+  --row-hover: #f1f0ed;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211;
+    --surface: #1a1a19;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --muted: #8f8e87;
+    --border: #2e2e2c;
+    --track: #31312e;
+    --s1: #3987e5;
+    --s1-soft: #1c3557;
+    --good: #0ca30c;
+    --warn: #fab219;
+    --none: #6b6a65;
+    --callout: #18222f;
+    --row-hover: #232321;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211;
+  --surface: #1a1a19;
+  --text: #f0efec;
+  --text-2: #c3c2b7;
+  --muted: #8f8e87;
+  --border: #2e2e2c;
+  --track: #31312e;
+  --s1: #3987e5;
+  --s1-soft: #1c3557;
+  --good: #0ca30c;
+  --warn: #fab219;
+  --none: #6b6a65;
+  --callout: #18222f;
+  --row-hover: #232321;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.6 "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+header h1 { font-size: 26px; line-height: 1.3; margin: 0 0 6px; font-weight: 650; }
+header p { margin: 0; color: var(--text-2); }
+.meta-line { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 13px; }
+h2 { font-size: 18px; margin: 40px 0 4px; font-weight: 650; }
+.sec-sub { color: var(--text-2); margin: 0 0 16px; }
+h3 { font-size: 15px; margin: 0 0 4px; font-weight: 600; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+.card .note { color: var(--muted); font-size: 12.5px; margin: 10px 0 0; }
+.grid { display: grid; gap: 16px; }
+.g4 { grid-template-columns: repeat(4, 1fr); }
+.g2 { grid-template-columns: 1fr 1fr; }
+@media (max-width: 900px) { .g4 { grid-template-columns: 1fr 1fr; } .g2 { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .wrap { padding: 20px 16px 48px; } .g4 { grid-template-columns: 1fr; } header h1 { font-size: 22px; } }
+
+.kpi .label { color: var(--text-2); font-size: 13px; }
+.kpi .value { font-size: 30px; font-weight: 650; line-height: 1.25; margin: 4px 0 2px; letter-spacing: -0.5px; }
+.kpi .value small { font-size: 15px; font-weight: 500; color: var(--text-2); letter-spacing: 0; }
+.kpi .sub { color: var(--muted); font-size: 12.5px; }
+.kpi .bar { height: 6px; background: var(--track); border-radius: 3px; margin-top: 10px; overflow: hidden; }
+.kpi .bar i { display: block; height: 100%; background: var(--s1); border-radius: 3px; }
+
+.callout { background: var(--callout); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-top: 16px; }
+.callout h3 { margin-bottom: 8px; }
+.callout ol { margin: 0; padding-left: 22px; }
+.callout li { margin: 4px 0; }
+.callout b { font-weight: 600; }
+
+/* 横向条形 */
+.hbars { display: flex; flex-direction: column; gap: 10px; }
+.hrow { display: grid; grid-template-columns: 150px 1fr 120px; align-items: center; gap: 12px; }
+.hrow .lab { color: var(--text-2); font-size: 13px; line-height: 1.35; }
+.hrow .lab small { display: block; color: var(--muted); font-size: 12px; }
+.hrow .val { font-size: 13px; text-align: right; color: var(--text); white-space: nowrap; }
+.hrow .val small { color: var(--muted); }
+.track { height: 18px; display: flex; gap: 2px; }
+.seg { height: 100%; min-width: 2px; }
+.seg.done { background: var(--s1); }
+.seg.todo { background: var(--track); }
+.seg:first-child { border-radius: 4px 0 0 4px; }
+.seg:last-child { border-radius: 0 4px 4px 0; }
+.seg:only-child { border-radius: 4px; }
+.seg[data-tip]:hover { filter: brightness(1.08); }
+.hbars.compact .hrow { grid-template-columns: 112px 1fr 92px; gap: 10px; }
+.hbars.compact { gap: 5px; }
+.hbars.compact .track { height: 14px; }
+@media (max-width: 520px) {
+  .hrow { grid-template-columns: 96px 1fr 84px; gap: 8px; }
+  .hbars.compact .hrow { grid-template-columns: 84px 1fr 70px; }
+}
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--text-2); margin: 2px 0 14px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+/* 柱状（时间线） */
+.vbars { display: flex; align-items: flex-end; gap: 2px; height: 150px; padding-top: 18px; border-bottom: 1px solid var(--border); }
+.vbar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; position: relative; }
+.vbar i { width: 70%; max-width: 34px; background: var(--s1); border-radius: 4px 4px 0 0; display: block; min-height: 2px; }
+.vbar b { font-size: 11.5px; font-weight: 500; color: var(--text-2); margin-bottom: 2px; }
+.vlabels { display: flex; gap: 2px; margin-top: 6px; }
+.vlabels span { flex: 1; text-align: center; font-size: 11px; color: var(--muted); line-height: 1.25; }
+
+.status { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 12.5px; color: var(--text-2); }
+.status::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--none); flex: none; }
+.status.full::before { background: var(--good); }
+.status.part::before { background: var(--warn); }
+.status.full::after { content: "✓"; color: var(--good); font-size: 11px; margin-left: -2px; display: none; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; font-size: 12.5px; color: var(--text-2); background: var(--surface); }
+.chip b { color: var(--text); font-weight: 600; }
+
+/* 表格 */
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+.tabs { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.tabs button { border: 0; background: transparent; color: var(--text-2); font: inherit; font-size: 13px; padding: 6px 12px; cursor: pointer; border-right: 1px solid var(--border); }
+.tabs button:last-child { border-right: 0; }
+.tabs button.on { background: var(--s1); color: #fff; }
+.toolbar input { font: inherit; font-size: 13px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); min-width: 200px; }
+.toolbar .count { color: var(--muted); font-size: 13px; margin-left: auto; }
+.tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); max-height: 680px; overflow-y: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--surface); color: var(--text-2); font-weight: 600; font-size: 12.5px; cursor: pointer; user-select: none; z-index: 1; box-shadow: 0 1px 0 var(--border); }
+th[data-k]:hover { color: var(--text); }
+th.sorted::after { content: " ↓"; color: var(--s1); }
+th.sorted.asc::after { content: " ↑"; }
+td.num, th.num { text-align: right; }
+tbody tr:hover { background: var(--row-hover); }
+td.code { color: var(--muted); font-size: 12.5px; }
+.pbar { display: inline-flex; align-items: center; gap: 8px; }
+.pbar .t { width: 72px; height: 8px; background: var(--track); border-radius: 4px; overflow: hidden; }
+.pbar .t i { display: block; height: 100%; background: var(--s1); border-radius: 4px; }
+.pbar span { min-width: 64px; display: inline-block; }
+.qc { display: inline-flex; flex-direction: column; gap: 2px; min-width: 44px; }
+.qc .t { height: 4px; background: var(--track); border-radius: 2px; overflow: hidden; }
+.qc .t i { display: block; height: 100%; background: var(--s1); }
+.qc span { font-size: 12px; color: var(--text-2); }
+.qc.na span { color: var(--muted); }
+.tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--border); color: var(--muted); margin-left: 6px; vertical-align: 1px; }
+.muted { color: var(--muted); }
+
+details { margin-top: 12px; }
+details summary { cursor: pointer; color: var(--text-2); }
+.ex-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 12px; margin-top: 12px; font-size: 12.5px; color: var(--text-2); }
+.ex-list span b { color: var(--text); font-weight: 500; }
+.notes { color: var(--text-2); }
+.notes li { margin: 6px 0; }
+.notes code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; background: var(--track); padding: 0 4px; border-radius: 3px; }
+
+#tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.5; box-shadow: 0 4px 16px rgba(0,0,0,.12); max-width: 280px; display: none; }
+#tip b { font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>研报概念数据整理进度</h1>
+    <p>研报逐篇逻辑链抽取（<code>extract_logic_chain.py</code>）的进度：哪些公司已经做完、做完的是否完整、没做完的还差多少。由 <code>python extract_logic_chain.py --task coverage</code> 生成。</p>
+    <div class="meta-line" id="metaLine"></div>
+  </header>
+
+  <section class="grid g4" style="margin-top:22px" id="kpis"></section>
+  <div class="callout" id="findings"></div>
+
+  <h2>口径：从研报到抽取样本</h2>
+  <p class="sec-sub" id="funnelSub"></p>
+  <div class="card">
+    <div class="hbars" id="funnel"></div>
+    <p class="note" id="funnelNote"></p>
+  </div>
+
+  <h2>公司层面的完成情况</h2>
+  <p class="sec-sub" id="groupSub"></p>
+  <div class="grid g2">
+    <div class="card">
+      <h3>按公司完成状态</h3>
+      <div class="legend"><span><i style="background:var(--s1)"></i>已完成研报</span><span><i style="background:var(--track)"></i>未完成研报</span></div>
+      <div class="hbars" id="groups"></div>
+      <p class="note">条长按研报篇数，同一刻度。</p>
+    </div>
+    <div class="card">
+      <h3>按发布季度</h3>
+      <div class="legend"><span><i style="background:var(--s1)"></i>已完成研报</span><span><i style="background:var(--track)"></i>未完成研报</span></div>
+      <div class="hbars" id="quarters"></div>
+      <p class="note">季度按研报发布日期划分。</p>
+    </div>
+  </div>
+
+  <h2>已处理公司的完整性</h2>
+  <p class="sec-sub" id="fullSub"></p>
+  <div class="grid g2">
+    <div class="card">
+      <h3>全部完成的公司：能算分歧度的季度数</h3>
+      <p class="muted" style="margin:0 0 12px;font-size:12.5px">一个季度做完的研报不少于 2 篇才能算公司-季度分歧度。</p>
+      <div class="hbars" id="usable"></div>
+      <p class="note" id="usableNote"></p>
+    </div>
+    <div class="card">
+      <h3>部分完成的公司：两种情况</h3>
+      <div id="partial"></div>
+    </div>
+  </div>
+
+  <h2>未完成的公司还差多少</h2>
+  <p class="sec-sub" id="todoSub"></p>
+  <div class="grid g2">
+    <div class="card">
+      <h3>剩余篇数最多的 25 家</h3>
+      <div class="legend"><span><i style="background:var(--s1)"></i>已完成</span><span><i style="background:var(--track)"></i>未完成</span></div>
+      <div class="hbars compact" id="topTodo"></div>
+    </div>
+    <div class="card">
+      <h3>剩余工作量（粗估）</h3>
+      <div id="estimate"></div>
+      <h3 style="margin-top:22px">已有存档的写入时间</h3>
+      <p class="muted" style="margin:0;font-size:12.5px">每小时新存档的研报篇数（只计当前口径内的）。</p>
+      <div class="vbars" id="timeline"></div>
+      <div class="vlabels" id="timelineLabels"></div>
+    </div>
+  </div>
+
+  <h2>逐家公司明细</h2>
+  <p class="sec-sub">点表头排序；季度一栏是“已完成/选中”篇数，“—”表示这家公司该季度没有研报进样本。</p>
+  <div class="toolbar">
+    <div class="tabs" id="tabs"></div>
+    <input id="search" type="search" placeholder="搜索公司名或代码">
+    <span class="count" id="count"></span>
+  </div>
+  <div class="tbl-wrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
+
+  <h2>不在抽取口径内的公司</h2>
+  <p class="sec-sub" id="exSub"></p>
+  <div class="card">
+    <details><summary id="exSummary"></summary><div class="ex-list" id="exList"></div></details>
+  </div>
+
+  <h2>统计口径说明</h2>
+  <div class="card notes"><ul id="notes"></ul></div>
+</div>
+<div id="tip"></div>
+
+<script>
+const DATA = __DATA__;
+const S = DATA.summary, C = DATA.companies, EX = DATA.excluded, R = S.run;
+const fmt = n => Number(n).toLocaleString('zh-CN');
+const pct = (a, b, d = 1) => b ? (100 * a / b).toFixed(d) + '%' : '—';
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const sum = (arr, k) => arr.reduce((s, c) => s + c[k], 0);
+const median = a => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor(s.length / 2)] : 0; };
+const avgW = (arr, k, w) => { let s = 0, n = 0; arr.forEach(c => { if (c[k] != null) { s += c[k] * c[w]; n += c[w]; } }); return n ? s / n : 0; };
+const Q = Object.keys(S.quarters);
+const qName = q => q.replace(/^(\d{4})Q/, '$1 年 Q');
+const MPQ = S.min_per_quarter;
+
+C.forEach(c => {
+  c.pct = c.done / c.total;
+  c.group = c.done === c.total ? 'full' : c.done === 0 ? 'zero' : 'part';
+});
+const full = C.filter(c => c.group === 'full'), part = C.filter(c => c.group === 'part'), zero = C.filter(c => c.group === 'zero');
+const notFull = C.filter(c => c.group !== 'full');
+const GROUP_NAME = {full: '全部完成', part: '部分完成', zero: '未开始'};
+const partLow = part.filter(c => c.pct < 0.5), partHigh = part.filter(c => c.pct >= 0.5);
+const lowDone = avgW(partLow, 'chars_done', 'done'), lowTodo = avgW(partLow, 'chars_todo', 'todo');
+const lowBiased = partLow.length > 0 && lowDone > 2 * lowTodo;  // 部分完成公司里先做的明显是长篇
+const todoInZero = sum(zero, 'todo'), todoInPart = sum(part, 'todo');
+const remPara = S.paras_total - S.paras_done;
+const usdPerPara = R ? R.usd / R.paras : 0, secPerPara = R ? R.seconds / R.paras : 0;
+const estUsd = remPara * usdPerPara, estHour = remPara * secPerPara / 3600;
+
+// ---------- 头部 ----------
+$('metaLine').innerHTML = [
+  S.latest ? `最新存档 ${S.latest}` : '还没有存档',
+  `页面生成 ${S.generated}`,
+  `样本 ${fmt(S.n_sel)} 篇研报 · ${C.length} 家公司`,
+].map(s => `<span>${s}</span>`).join('');
+
+// ---------- KPI ----------
+const kpis = [
+  {label: '已完成研报', value: `${fmt(S.n_done)}<small> / ${fmt(S.n_sel)}</small>`, sub: `完成 ${pct(S.n_done, S.n_sel)} · 段落完成 ${pct(S.paras_done, S.paras_total)}`, bar: S.n_done / S.n_sel},
+  {label: '全部完成的公司', value: `${full.length}<small> / ${C.length} 家</small>`, sub: `部分完成 ${part.length} 家 · 未开始 ${zero.length} 家`, bar: full.length / C.length},
+  {label: '已抽出的概念', value: `${fmt(S.n_concepts_total)}`, sub: `逻辑图第 3–5 层概念，平均每篇 ${S.n_done ? (S.n_concepts_total / S.n_done).toFixed(1) : '—'} 个；原文边 ${fmt(S.n_edges_total)} 条`},
+  {label: '还差', value: `${fmt(S.n_todo)}<small> 篇</small>`, sub: `${fmt(remPara)} 段` + (R ? `；按最近一次运行的速率约 $${Math.round(estUsd)}、${estHour.toFixed(1)} 小时` : '')},
+];
+$('kpis').innerHTML = kpis.map(k => `<div class="card kpi"><div class="label">${k.label}</div><div class="value">${k.value}</div><div class="sub">${k.sub}</div>${k.bar != null ? `<div class="bar"><i style="width:${(k.bar * 100).toFixed(1)}%"></i></div>` : ''}</div>`).join('');
+
+// ---------- 要点 ----------
+const items = [];
+if (full.length) {
+  const big = full.slice().sort((a, b) => b.total - a.total).slice(0, 3);
+  items.push(`<b>${full.length} 家公司全部做完</b>，共 ${fmt(sum(full, 'total'))} 篇研报，篇数最多的是 ${big.map(c => `${esc(c.name)}（${c.total} 篇）`).join('、')}。全部完成公司的篇数中位数 ${median(full.map(c => c.total))} 篇${notFull.length ? `（未做完的公司是 ${median(notFull.map(c => c.total))} 篇）` : ''}，30 篇以上的有 ${full.filter(c => c.total >= 30).length} 家。`);
+}
+const nAllQ = full.filter(c => c.n_quarters === Q.length).length, nOneQ = full.filter(c => c.n_quarters === 1).length;
+items.push(`<b>逐篇核对存档指纹：有效 ${fmt(S.n_done)} 篇，对不上 ${fmt(S.n_stale)} 篇</b>${S.n_stale ? '（段落或提示词变过，算作未完成，下次抽取会重新处理）' : ''}。全部完成的公司里，${nAllQ} 家 ${Q.length} 个季度都有样本，${nOneQ} 家只有 1 个季度。`);
+if (part.length) {
+  let s = `<b>${part.length} 家部分完成</b>`;
+  if (partLow.length) {
+    s += `，其中 <b>${partLow.length} 家只做了 1–${Math.max(...partLow.map(c => c.done))} 篇</b>`;
+    s += lowBiased ? `：先做的多是长篇（这些公司已做的平均 ${fmt(Math.round(lowDone))} 字，没做的平均 ${fmt(Math.round(lowTodo))} 字），已有样本偏向深度报告，不能代表公司全貌。`
+                   : `（已做的平均 ${fmt(Math.round(lowDone))} 字，没做的平均 ${fmt(Math.round(lowTodo))} 字）。`;
+  } else s += '。';
+  if (partHigh.length) s += `另有 ${partHigh.length} 家只差 1–${Math.max(...partHigh.map(c => c.todo))} 篇。`;
+  items.push(s);
+}
+if (notFull.length) {
+  const most = notFull.slice().sort((a, b) => b.todo - a.todo)[0];
+  items.push(`<b>还差 ${fmt(S.n_todo)} 篇</b>：${fmt(todoInPart)} 篇在部分完成的公司，${fmt(todoInZero)} 篇在 ${zero.length} 家未开始的公司。差得最多的是${esc(most.name)}，差 ${most.todo} 篇。`);
+}
+if (S.wave1_n) {
+  const w1Done = C.filter(c => c.wave1 && c.group === 'full').length;
+  items.push(`<b>“第一批”名单（<code>data/wave1_companies.txt</code>，${S.wave1_n} 家）${w1Done === S.wave1_in_sel ? '已经覆盖' : `做完 ${w1Done}/${S.wave1_in_sel} 家`}</b>：${S.wave1_in_sel} 家在样本内，做完 ${w1Done} 家；另 ${S.wave1_excluded.length} 家每个季度都不足 ${MPQ} 篇，不在抽取口径内。`);
+}
+$('findings').innerHTML = `<h3>要点</h3><ol>${items.map(s => `<li>${s}</li>`).join('')}</ol>`;
+
+// ---------- 漏斗 ----------
+const funnel = [
+  ['元数据表全部文件', S.n_meta, ''],
+  ['有正文', S.n_ok, '去掉空文件、扫描件、乱码'],
+  ['个股公司研报', S.n_stock_ok, ''],
+  ['代码、公司、券商齐全', S.n_sel_noq, '按抽取脚本的 select'],
+  [`公司当季 ≥ ${MPQ} 篇`, S.n_sel, '抽取样本'],
+  ['已完成', S.n_done, '存档有效'],
+];
+$('funnel').innerHTML = funnel.map(([lab, v, sub], i) => {
+  const prev = i ? funnel[i - 1][1] : v;
+  return `<div class="hrow"><div class="lab">${lab}${sub ? `<small>${sub}</small>` : ''}</div>
+    <div class="track"><div class="seg done" style="width:${100 * v / S.n_meta}%;${i === funnel.length - 1 ? '' : 'opacity:.85'}" data-tip="<b>${lab}</b><br>${fmt(v)} 篇${i ? `，为上一步的 ${pct(v, prev)}` : ''}"></div></div>
+    <div class="val">${fmt(v)}${i ? ` <small>${pct(v, prev, 0)}</small>` : ''}</div></div>`;
+}).join('');
+$('funnelNote').innerHTML = '百分比是相对上一步。' + (S.n_orphan ? `另有 ${S.n_orphan} 个存档不在当前样本里（${S.orphan_thin === S.n_orphan ? '都' : `其中 ${S.orphan_thin} 篇`}是公司当季不足 ${MPQ} 篇被剔除的研报），不计入已完成。` : '');
+$('funnelSub').innerHTML = `样本按 <code>extract_logic_chain.py</code> 的筛选条件复现：个股公司研报，代码、公司名、券商都识别出来了，且同一公司同一季度至少 ${MPQ} 篇。`;
+
+// ---------- 公司分组 / 季度 ----------
+$('groupSub').textContent = `样本里共 ${C.length} 家公司。全部完成按“选中研报全部有有效存档”计，部分完成是做了一部分，未开始是一篇都没做。`;
+const stackRow = (lab, sub, done, total, max, tipHead, val) => {
+  const todo = total - done, segs = [];
+  if (done) segs.push(`<div class="seg done" style="width:${100 * done / max}%" data-tip="<b>${tipHead}</b><br>已完成 ${fmt(done)} 篇（${pct(done, total)}）"></div>`);
+  if (todo) segs.push(`<div class="seg todo" style="width:${100 * todo / max}%" data-tip="<b>${tipHead}</b><br>未完成 ${fmt(todo)} 篇（${pct(todo, total)}）"></div>`);
+  return `<div class="hrow"><div class="lab">${lab}${sub ? `<small>${sub}</small>` : ''}</div><div class="track">${segs.join('')}</div><div class="val">${val || `${fmt(done)} <small>/ ${fmt(total)}</small>`}</div></div>`;
+};
+const maxG = Math.max(sum(full, 'total'), sum(part, 'total'), sum(zero, 'total'));
+$('groups').innerHTML = [[full, 'full'], [part, 'part'], [zero, 'zero']].map(([g, k]) =>
+  stackRow(`<span class="status ${k}">${GROUP_NAME[k]}</span>`, `${g.length} 家公司`, sum(g, 'done'), sum(g, 'total'), maxG, `${GROUP_NAME[k]}（${g.length} 家）`)).join('');
+const maxQ = Math.max(...Q.map(q => S.quarters[q][0]));
+$('quarters').innerHTML = Q.map(q => stackRow(qName(q), `完成 ${pct(S.quarters[q][1], S.quarters[q][0])}`, S.quarters[q][1], S.quarters[q][0], maxQ, q)).join('');
+
+// ---------- 完整性 ----------
+$('fullSub').textContent = `全部完成的 ${full.length} 家公司，选中的研报都已做完；下面看它们够不够做公司-季度比较，以及部分完成的公司缺在哪里。`;
+const uq = Q.map((_, i) => Q.length - i).map(n => [n, full.filter(c => c.usable_q === n)]).filter(([, g]) => g.length);
+const maxU = Math.max(1, ...uq.map(([, g]) => g.length));
+$('usable').innerHTML = uq.map(([n, g]) => `<div class="hrow"><div class="lab">${n} 个季度</div>
+  <div class="track"><div class="seg done" style="width:${100 * g.length / maxU}%" data-tip="<b>${n} 个季度可算分歧度</b><br>${g.length} 家公司，共 ${fmt(sum(g, 'total'))} 篇<br>例：${esc(g.slice(0, 5).map(c => c.name).join('、'))}"></div></div>
+  <div class="val">${g.length} 家 <small>${fmt(sum(g, 'total'))} 篇</small></div></div>`).join('') || '<p class="muted">还没有全部完成的公司。</p>';
+const one = full.filter(c => c.usable_q === 1);
+$('usableNote').innerHTML = (one.length ? `只有 1 个季度的公司多是研报少的（中位数 ${median(one.map(c => c.total))} 篇）。` : '')
+  + (full.length ? `全部完成公司平均每篇 ${(sum(full, 'concepts_total') / sum(full, 'total')).toFixed(1)} 个概念。` : '');
+
+const chips = list => list.map(c => `<span class="chip"><b>${esc(c.name)}</b> ${c.done}/${c.total}</span>`).join('');
+const lowShow = partLow.slice().sort((a, b) => b.total - a.total);
+$('partial').innerHTML = !part.length ? '<p class="muted">没有部分完成的公司。</p>' : `
+  ${partHigh.length ? `<p style="margin:6px 0 8px"><span class="status part">接近完成</span> <b>${partHigh.length} 家</b>，共差 ${sum(partHigh, 'todo')} 篇，接着跑就能补齐（差的可能是运行停止时没做完的，或调用失败没存档的）：</p>
+  <div class="chips">${chips(partHigh.slice().sort((a, b) => b.pct - a.pct).slice(0, 20))}${partHigh.length > 20 ? `<span class="chip">… 另 ${partHigh.length - 20} 家</span>` : ''}</div>` : ''}
+  ${partLow.length ? `<p style="margin:16px 0 8px"><span class="status part">${lowBiased ? '只做了长篇' : '只做了少量'}</span> <b>${partLow.length} 家</b>，已做 ${sum(partLow, 'done')} 篇、差 ${fmt(sum(partLow, 'todo'))} 篇。已做的平均 ${fmt(Math.round(lowDone))} 字，未做的平均 ${fmt(Math.round(lowTodo))} 字（全样本平均 ${fmt(S.all_chars_mean)} 字）${lowBiased ? '，基本是每家先做了几篇深度报告' : ''}。研报最多的几家：</p>
+  <div class="chips">${chips(lowShow.slice(0, 14))}${lowShow.length > 14 ? `<span class="chip">… 另 ${lowShow.length - 14} 家</span>` : ''}</div>
+  <p class="note">这些公司季度内大多不足 2 篇做完的研报，${lowBiased ? '已有的又偏向深度报告，' : ''}框架对比和分歧度计算建议等补齐后再用。</p>` : ''}`;
+
+// ---------- 未完成 ----------
+$('todoSub').textContent = notFull.length ? `${notFull.length} 家公司没做完，共差 ${fmt(S.n_todo)} 篇、${fmt(remPara)} 个段落；中位数每家差 ${median(notFull.map(c => c.todo))} 篇。` : '全部公司都做完了。';
+const topList = notFull.slice().sort((a, b) => b.todo - a.todo).slice(0, 25);
+const maxT = Math.max(1, ...topList.map(c => c.total));
+$('topTodo').innerHTML = topList.map(c => stackRow(esc(c.name), '', c.done, c.total, maxT, `${esc(c.name)} ${c.code}`, `差 ${c.todo} <small>/ ${c.total}</small>`)).join('');
+
+const groupsTodo = [['部分完成的公司', part.length, todoInPart, sum(part, 'todo_paras')], ['未开始的公司', zero.length, todoInZero, sum(zero, 'todo_paras')]];
+const maxR = Math.max(1, todoInPart, todoInZero);
+$('estimate').innerHTML = `
+  <div class="hbars" style="margin:10px 0 6px">
+    ${groupsTodo.map(([lab, n, r, p]) => `<div class="hrow"><div class="lab">${lab}<small>${n} 家</small></div><div class="track"><div class="seg todo" style="width:${100 * r / maxR}%;background:var(--s1-soft)" data-tip="<b>${lab}</b><br>差 ${fmt(r)} 篇、${fmt(p)} 段${R ? `<br>约 $${Math.round(p * usdPerPara)}、${(p * secPerPara / 3600).toFixed(1)} 小时` : ''}"></div></div><div class="val">${fmt(r)} 篇 <small>${fmt(p)} 段</small></div></div>`).join('')}
+  </div>` + (R ? `
+  <p style="margin:12px 0 0">合计约 <b>$${Math.round(estUsd)}</b>、并行 ${R.workers} 时约 <b>${estHour.toFixed(1)} 小时</b>。</p>
+  <p class="note">按最近一次记了花费的运行（${R.start.slice(5, 16)} 起，模型 ${esc(R.model)}，并行 ${R.workers}）的实际速率估算：花 $${R.usd.toFixed(2)} 做完 ${fmt(R.reports)} 篇、${fmt(R.paras)} 段，用时 ${Math.round(R.seconds / 60)} 分钟；按段落数折算，只是量级参考。剩下的研报平均每篇 ${S.n_todo ? (remPara / S.n_todo).toFixed(1) : '—'} 段，那一轮是 ${(R.paras / R.reports).toFixed(1)} 段。</p>`
+  : `<p class="note">进度日志里没有记了花费的运行（用 --budget 运行时才记），无法估算花费和用时。</p>`);
+
+const maxH = Math.max(1, ...S.timeline.map(t => t[1]));
+$('timeline').innerHTML = S.timeline.map(([h, n]) => `<div class="vbar" data-tip="<b>${h}</b><br>新存档 ${fmt(n)} 篇"><b>${n}</b><i style="height:${Math.max(2, 100 * n / maxH * 0.82)}%"></i></div>`).join('');
+$('timelineLabels').innerHTML = S.timeline.map(([h]) => `<span>${h.slice(0, 5)}<br>${h.slice(6, 8)}时</span>`).join('');
+
+// ---------- 明细表 ----------
+const COLS = [
+  {k: 'group', t: '状态', f: c => `<span class="status ${c.group}">${GROUP_NAME[c.group]}</span>`, sort: c => ({full: 0, part: 1, zero: 2})[c.group]},
+  {k: 'code', t: '代码', cls: 'code', f: c => c.code},
+  {k: 'name', t: '公司', f: c => esc(c.name) + (c.wave1 ? '<span class="tag">第一批</span>' : '')},
+  {k: 'pct', t: '完成', f: c => `<span class="pbar"><span class="t"><i style="width:${(c.pct * 100).toFixed(1)}%"></i></span><span>${c.done}/${c.total}</span></span>`, sort: c => c.pct * 1e4 + c.total / 1e3},
+  {k: 'todo', t: '剩余篇数', num: true, f: c => c.todo ? c.todo : '<span class="muted">0</span>'},
+  ...Q.map(q => ({k: q, t: q.slice(4), f: c => {
+    const [t, d] = c.q[q];
+    if (!t) return '<span class="qc na"><span class="t" style="visibility:hidden"></span><span>—</span></span>';
+    return `<span class="qc" title="${q}：已完成 ${d} / 选中 ${t}"><span class="t"><i style="width:${100 * d / t}%"></i></span><span>${d}/${t}</span></span>`;
+  }, sort: c => c.q[q][0] ? c.q[q][1] / c.q[q][0] : -1})),
+  {k: 'brokers', t: '券商（已做/全部）', num: true, f: c => `${c.brokers_done}/${c.brokers}`, sort: c => c.brokers},
+  {k: 'usable_q', t: '可算分歧季度', num: true, f: c => `${c.usable_q}/${c.n_quarters}`},
+  {k: 'concepts_mean', t: '平均概念/篇', num: true, f: c => c.concepts_mean == null ? '<span class="muted">—</span>' : c.concepts_mean.toFixed(1), sort: c => c.concepts_mean ?? -1},
+  {k: 'todo_paras', t: '剩余段落', num: true, f: c => c.todo_paras ? fmt(c.todo_paras) : '<span class="muted">0</span>'},
+  {k: 'thin', t: '当季不足剔除', num: true, f: c => c.thin || '<span class="muted">0</span>'},
+  {k: 'last_done', t: '最近完成', f: c => c.last_done || '<span class="muted">—</span>', sort: c => c.last_done || ''},
+];
+const TABS = [['all', `全部 ${C.length}`], ['full', `全部完成 ${full.length}`], ['part', `部分完成 ${part.length}`], ['zero', `未开始 ${zero.length}`]];
+let tab = 'all', sortK = 'pct', asc = false, q = '';
+$('tabs').innerHTML = TABS.map(([k, t]) => `<button data-t="${k}" class="${k === tab ? 'on' : ''}">${t}</button>`).join('');
+$('tabs').onclick = e => { const b = e.target.closest('button'); if (!b) return; tab = b.dataset.t; [...$('tabs').children].forEach(x => x.classList.toggle('on', x === b)); render(); };
+$('search').oninput = e => { q = e.target.value.trim().toLowerCase(); render(); };
+const thead = $('tbl').tHead, tbody = $('tbl').tBodies[0];
+thead.innerHTML = '<tr>' + COLS.map(c => `<th data-k="${c.k}" class="${c.num ? 'num' : ''}">${c.t}</th>`).join('') + '</tr>';
+thead.onclick = e => { const th = e.target.closest('th'); if (!th) return; const k = th.dataset.k; if (k === sortK) asc = !asc; else { sortK = k; asc = ['code', 'name', 'group'].includes(k); } render(); };
+function render() {
+  const col = COLS.find(c => c.k === sortK);
+  const key = col.sort || (c => c[col.k]);
+  const rows = C.filter(c => (tab === 'all' || c.group === tab) && (!q || c.name.toLowerCase().includes(q) || c.code.toLowerCase().includes(q)));
+  rows.sort((a, b) => { const x = key(a), y = key(b); const r = typeof x === 'string' ? x.localeCompare(y, 'zh-CN') : x - y; return (asc ? r : -r) || b.total - a.total; });
+  tbody.innerHTML = rows.map(c => '<tr>' + COLS.map(col => `<td class="${col.num ? 'num' : ''} ${col.cls || ''}">${col.f(c)}</td>`).join('') + '</tr>').join('');
+  [...thead.rows[0].cells].forEach(th => { th.classList.toggle('sorted', th.dataset.k === sortK); th.classList.toggle('asc', th.dataset.k === sortK && asc); });
+  $('count').textContent = `${rows.length} 家 · 选中 ${fmt(sum(rows, 'total'))} 篇 · 已完成 ${fmt(sum(rows, 'done'))} 篇`;
+}
+render();
+
+// ---------- 剔除 ----------
+const exReports = EX.reduce((s, e) => s + e.n, 0);
+$('exSub').textContent = `另有 ${EX.length} 家公司有个股研报（共 ${fmt(exReports)} 篇），但每个季度都不足 ${MPQ} 篇，整家不在抽取口径内；样本内公司被剔除的零散季度另有 ${fmt(S.n_thin - exReports)} 篇（见明细表“当季不足剔除”一栏）。`;
+$('exSummary').textContent = `展开 ${EX.length} 家公司（按篇数从多到少）`;
+$('exList').innerHTML = EX.map(e => `<span><b>${esc(e.name)}</b> <span class="muted">${e.code} · ${e.n} 篇</span></span>`).join('');
+
+// ---------- 说明 ----------
+$('notes').innerHTML = [
+  `“已完成”= 输出目录 <code>cache/reports/</code> 下有这篇的存档，而且存档指纹和当前的段落文字、公司和标题、提示词、预置会计清单都对得上（规则同抽取脚本读回存档：有效 ${fmt(S.n_done)} 篇，对不上 ${fmt(S.n_stale)} 篇）。存档文件共 ${fmt(S.n_archives)} 个，其中 ${fmt(S.n_orphan)} 个不在当前样本里。`,
+  `样本按 <code>extract_logic_chain.py</code> 的 <code>select</code> 和 <code>MIN_PER_QUARTER = ${MPQ}</code> 复现，默认不限公司（即 <code>--companies all</code>），和抽取日志里“剩 N 篇”一致。日志里的“累计完成”可能比这里多几篇：大模型调用重试用完仍失败的研报照常输出但不存档，下次运行重试。`,
+  `概念数、原文边数从存档的逻辑图算，口径同 <code>sort_divergence.py</code> 的研报大小：概念是第 3–5 层的节点（经营指标、公司经营与行业、外部环境），不含预置的会计科目和估值；原文边是有原文证据的边（extracted、bridged），不含补全和预置的。`,
+  `下游结果：<code>data/graphs/</code> 里有 ${fmt(S.n_graphs)} 篇的逻辑图，框架对比（<code>data/compare/</code>）有 ${fmt(S.n_compare)} 篇；它们只在抽取正常结束、运行 <code>--task compare</code> 时更新。${S.n_graphs < S.n_done || S.n_compare < S.n_done ? `<b>比已完成的 ${fmt(S.n_done)} 篇少，新做完的研报还没进去。</b>` : ''}`,
+  `“可算分歧季度”= 该公司做完的研报不少于 2 篇的季度数 / 选中研报所在的季度数。季度按发布日期划分。`,
+  `剩余花费和时间按进度日志里最近一次记了花费的运行，以“美元/段落”“秒/段落”折算，实际会随研报长度、并发和接口状况变化。`,
+].map(s => `<li>${s}</li>`).join('');
+
+// ---------- 悬停提示 ----------
+const tip = $('tip');
+document.addEventListener('mousemove', e => {
+  const el = e.target.closest('[data-tip]');
+  if (!el) { tip.style.display = 'none'; return; }
+  tip.innerHTML = el.dataset.tip;
+  tip.style.display = 'block';
+  const r = tip.getBoundingClientRect();
+  let x = e.clientX + 14, y = e.clientY + 14;
+  if (x + r.width > innerWidth - 8) x = e.clientX - r.width - 14;
+  if (y + r.height > innerHeight - 8) y = e.clientY - r.height - 14;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+});
+</script>
+</body>
+</html>

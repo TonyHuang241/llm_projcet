@@ -2,6 +2,7 @@
 /data/
 /output/
 /output_sample/
+/output_dag/
 /literature/**/*.pdf
 
 # 敏感信息、本机配置与缓存
