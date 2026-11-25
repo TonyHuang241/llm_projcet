@@ -1,4 +1,4 @@
-"""读 accuracy 步骤的成品（output/accuracy/ 下的三张表）。下游通过这里读，不自己拼路径。
+"""读 accuracy 步骤的成品（output/accuracy/<样本>/ 下的三张表，默认样本 hs300_deep）。下游通过这里读，不自己拼路径。
 
 这里一切都是原始值：没有缩尾、没有标准化，MOM、VOL、ROA_T 是小数（文档里以 % 报告，研究层自己乘 100）。口径细节见
 src/accuracy/forecasts.py、peers.py、controls.py 的模块说明。
@@ -6,7 +6,7 @@ src/accuracy/forecasts.py、peers.py、controls.py 的模块说明。
 预测窗口：h = 1、2、3（H1、H2、H3）= 本篇（或被评价）预测行的第 h 年预测 PROFIT_Th，目标年度 = 该行的 RPT_YR_T + h，逐篇（逐对）
 不同。列名后缀 _Hh 表示窗口 h（下面写成 _Hh 的列每个 h 各一列）。研究层的主窗口见 src/studies/forecast_accuracy/sample.py 的 MAIN_H。
 
-report_accuracy.parquet：每篇研报一行（研报范围 = graph 步骤的全部研报，行序同 src.graph.load.read_table('reports')）
+report_accuracy.parquet：每篇研报一行（研报范围 = 样本清单里已有抽取结果的研报，行序同 src.graph.load.read_table('reports', 样本)）
   report_id       研报 ID（graph 研报表的 report_id）
   code            公司代码，graph 研报表 stock_code 的前 6 位
   date            发布日 YYYYMMDD（graph 研报表的 date）
@@ -71,25 +71,28 @@ pair_accuracy.parquet：每个（公司，券商）一行；范围 = report_accu
 """
 import pandas as pd
 
-from src.config import out_dir
+from src.config import DEFAULT_SAMPLE, accuracy_dir
 
 STEP = 'accuracy'
 
 
-def _read(name, columns=None, out=None):
-    return pd.read_parquet((out or out_dir(STEP)) / name, columns=columns)
+def _read(name, columns=None, out=None, sample=DEFAULT_SAMPLE):
+    p = (out or accuracy_dir(sample)) / name
+    if not p.exists():
+        raise SystemExit(f'缺少 {p}：先运行 python run.py accuracy --sample {sample}')
+    return pd.read_parquet(p, columns=columns)
 
 
-def report_accuracy(columns=None, out=None):
-    """每篇研报一行的预测准确度、比较组变量和控制变量（列见模块说明）。out：另指定的输出目录。"""
-    return _read('report_accuracy.parquet', columns, out)
+def report_accuracy(columns=None, out=None, sample=DEFAULT_SAMPLE):
+    """样本里每篇研报一行的预测准确度、比较组变量和控制变量（列见模块说明）。out：另指定的输出目录（优先于 sample）。"""
+    return _read('report_accuracy.parquet', columns, out, sample)
 
 
-def report_peers(columns=None, out=None):
+def report_peers(columns=None, out=None, sample=DEFAULT_SAMPLE):
     """三个窗口 [d − 90, d] 比较组的同行明细（列见模块说明，列 h 标明窗口）。"""
-    return _read('report_peers.parquet', columns, out)
+    return _read('report_peers.parquet', columns, out, sample)
 
 
-def pair_accuracy(columns=None, out=None):
+def pair_accuracy(columns=None, out=None, sample=DEFAULT_SAMPLE):
     """每个（公司，券商）一行的被评价预测、PMAFE、DAGE 和控制变量（列见模块说明）。"""
-    return _read('pair_accuracy.parquet', columns, out)
+    return _read('pair_accuracy.parquet', columns, out, sample)

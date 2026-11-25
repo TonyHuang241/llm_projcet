@@ -1,7 +1,7 @@
-"""跨研报概念名称统一：概念 DAG 抽完之后（src/graph/extract.py），把不同研报里指完全相同的东西、只是说法不同的概念名称
+"""抽取版本 v1 的跨研报概念名称统一：概念 DAG 抽完之后（本目录的 extract.py），把不同研报里指完全相同的东西、只是说法不同的概念名称
 统一成一个，方便在研报之间比较概念和边。只在细节层面合并同一个量的不同叫法（营收 / 营业收入，PE / 市盈率），
-范围、口径、主体、指标不同的，有因果或上下位关系的，都不合并。提示词见 src/graph/prompts/unify.md，
-入口是 python run.py unify（命令行选项和运行参数见本文件末尾的 add_args / run，按 --run 找概念 DAG 的输出目录）。
+范围、口径、主体、指标不同的，有因果或上下位关系的，都不合并。提示词见本目录的 prompts/unify.md，
+入口是 python run.py unify --version v1（命令行选项在 src/graph/unify_cmd.py，选好版本后调用这里的 main，对整个库统一）。
 
 按公司分别统一：同一个说法在不同公司的研报里可能指不同的东西，所以只在同一家公司的研报之间统一，每家公司各有一套词条、
 候选组和统一结果；只有 1 篇研报的公司没有可统一的，概念名保持原样。
@@ -22,11 +22,11 @@
 不等其他候选组、也不分公司分批；线程池里始终有 workers 个调用在途，直到最后剩下的不足 workers 个
 （日志里每分钟记一行在途调用数）。
 
-调用缓存在 <输出目录>/cache/unify_cache.jsonl、unify_verify_cache.jsonl（键含提示词指纹和这一组的全部输入），
+调用缓存在 <库>/cache/unify_cache.jsonl、unify_verify_cache.jsonl（键含提示词指纹和这一组的全部输入），
 重跑时没变的组直接取结果；概念 DAG 新增了研报、候选组变了的，只重做变了的组。
 
-输出（<输出目录>，默认 output/graph/<运行名>/）：
-  概念统一.html                   核对页面（模板 src/graph/unify_review.html）：合并了哪些名称、各出现在哪些研报、理由，复核剔除了哪些
+输出（<库>，即 output/graph/v1/）：
+  概念统一.html                   核对页面（模板本目录的 unify_review.html）：合并了哪些名称、各出现在哪些研报、理由，复核剔除了哪些
   data/unify.js                   核对页面和 概念DAG.html 读取的数据（各篇改了名的概念 -> 统一名称、合并组、复核剔除、统计）
   data/concept_unify.parquet      每篇研报每个概念一行：name 原名、unified 统一名称、changed 是否改了名
   data/unify_groups.parquet       每个合并组一行：统一名称、组内原名、涉及的研报和公司数、理由、复核剔除的名称
@@ -42,8 +42,9 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from src.graph.common import VIEWER_TEMPLATE, DagOut, fill, merge_direction, name_key, too_many, write_js, write_parquet
 from src.llm import LLM, Cache, FatalAPIError, InflightMeter, load_env, log, parse_json, set_log_path, text_hash, with_feedback
+
+from .common import VIEWER_TEMPLATE, DagOut, fill, merge_direction, name_key, too_many, write_js, write_parquet
 
 PROMPT_FILE = Path(__file__).resolve().parent / 'prompts' / 'unify.md'
 REVIEW_TEMPLATE = Path(__file__).resolve().parent / 'unify_review.html'
@@ -549,34 +550,6 @@ def main(out_dir, companies=None, workers=50, max_group=MAX_GROUP, dry_run=False
     log(f'核对页面：{page}（双击打开）；概念DAG.html 里勾选“统一名称”可按统一名称显示')
 
 
-# ==================== 入口：python run.py unify ====================
-# 运行参数：各次运行统一哪些公司写在 src/graph/__init__.py 的 RUNS（unify_companies），这里是共用的默认值
-WORKERS = 50
+# ==================== 默认运行参数（入口 src/graph/unify_cmd.py 用） ====================
+WORKERS = 50  # 同时在途的大模型调用数
 # MAX_GROUP 见上面的常量：每个候选组最多这么多个名称（太大时模型一次要比较的名称多、容易漏，太小时相近的名称可能分到不同组）
-
-
-def add_args(ap):
-    from src.graph import DEFAULT_RUN, RUNS
-    ap.description = ('跨研报概念名称统一：在 python run.py graph 抽完的概念 DAG 上，把同一家公司不同研报里指完全相同的东西、'
-                      '只是说法不同的概念名称统一成一个（营收 / 营业收入，PE / 市盈率），合并组再逐组复核。'
-                      '读 output/graph/<运行名>/data/ 下的结果表，结果也写在那里，核对页面是 output/graph/<运行名>/概念统一.html；'
-                      '概念 DAG 新增了研报后重新运行即可，没变的候选组直接用缓存。'
-                      '例：python run.py unify --run deep --dry-run 只统计候选组，不调用大模型')
-    ap.add_argument('--run', default=DEFAULT_RUN, choices=sorted(RUNS),
-                    help=f'按哪次抽取运行的输出目录统一（output/graph/<运行名>/），默认 {DEFAULT_RUN}；'
-                         '不给 --companies 时用这次运行配置里的 unify_companies')
-    ap.add_argument('--output', default=None, help='概念 DAG 的输出目录；不给时用 output/graph/<运行名>/')
-    ap.add_argument('--companies', default=None, help='只统一这些股票代码的研报，逗号分隔；all 表示全部；不给时用运行配置里的 unify_companies')
-    ap.add_argument('--workers', type=int, default=WORKERS, help='同时在途的大模型调用数')
-    ap.add_argument('--max-group', type=int, default=MAX_GROUP, help='每个候选组最多多少个名称')
-    ap.add_argument('--dry-run', action='store_true', help='只统计候选组，不调用大模型')
-
-
-def run(args):
-    from src.config import out_dir
-    from src.graph import RUNS
-    companies = list(RUNS[args.run]['unify_companies'])  # 空列表表示概念 DAG 里的全部研报
-    if args.companies is not None:
-        companies[:] = [] if args.companies.lower() == 'all' else [x.strip().upper() for x in args.companies.split(',') if x.strip()]
-    main(args.output or out_dir('graph', args.run), companies=companies, workers=args.workers, max_group=args.max_group,
-         dry_run=args.dry_run)

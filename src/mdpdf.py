@@ -7,7 +7,7 @@
      Cambria Math，所以不联网、不依赖 MathJax / KaTeX。只支持文档里用到的 LaTeX 子集：字母、数字、运算符、上下标、\\frac、
      \\sum、\\left…\\right、\\boldsymbol、\\mathbf、\\mathrm、\\text、希腊字母、\\in、\\neq、\\times 等和 \\, \\; \\quad \\qquad
      等空白；遇到不认识的命令直接报错（指出是哪条命令），不会悄悄输出错的公式。行内的 $…$ 不处理。
-  3. HTML 带 <base href="md 所在目录">，图片等相对路径照 md 的位置解析，所以中间 HTML 可以写在任何地方（不在 docs/ 里留文件）。
+  3. HTML 带 <base href="md 所在目录">，图片等相对路径照 md 的位置解析，所以中间 HTML 可以写在任何地方（不在文档所在的目录里留文件）。
   4. 无头浏览器 --print-to-pdf，用临时的用户目录（不碰本机浏览器的配置），不打印页眉页脚；先写到临时目录，成功后再移到目标位置。
 
 版式：A4，页边距 20 mm；正文 Times New Roman + 宋体，标题微软雅黑；三线表；图片不超出版心；标题、表题、图和表尽量不跨页断开。

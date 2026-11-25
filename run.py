@@ -1,8 +1,10 @@
 """唯一入口：在仓库根目录运行 python run.py <步骤> [参数]，python run.py <步骤> --help 看该步骤的选项。
 
-步骤名只定义一次（下面的 STEPS）：命令名、src/ 下的目录名、output/ 下的目录名相同。每个步骤的模块提供 add_args(parser) 和
+步骤名只定义一次（下面的 STEPS）：命令名一般与 src/ 下的目录名、output/ 下的目录名相同（unify 是 graph 的后续步骤，结果写在
+graph 的库里；sample 管样本清单，代码和清单在 src/samples/，没有输出目录）。每个步骤的模块提供 add_args(parser) 和
 run(args)，默认运行参数写在该步骤自己的目录里；这里只做分发，选中子命令后才导入对应的模块（跑 text 不会导入 networkx、
 大模型调用等用不到的东西）。以后加步骤只需在 STEPS 里加一行。
+抽取版本（--version）和样本（--sample）两个概念见 README 和 src/config.py。
 专题研究：python run.py study <名字> [参数] → src/studies/<名字>/。
 """
 import argparse
@@ -12,18 +14,19 @@ import sys
 # 命令 -> (模块路径, 一句话说明)
 STEPS = {
     'text': ('src.text', '研报纯文本 -> 正文段落表和研报元数据表（不调用大模型）'),
-    'graph': ('src.graph', '正文段落 -> 每篇研报的概念和因果边（概念 DAG，调用大模型）'),
-    'unify': ('src.graph.unify', '概念 DAG 抽完后，跨研报统一同一家公司同一个概念的不同叫法（调用大模型）'),
-    'measure': ('src.measure', '概念 DAG -> 每篇研报的逻辑结构变量（源点数、路径数、平均路径长度，原始值，不调用大模型）'),
-    'accuracy': ('src.accuracy', '分析师预测表 + 实际值 + 行情 -> 每篇研报和每个公司-券商对的预测准确度、同行时滞、控制变量（原始值）'),
+    'sample': ('src.samples', '样本：列出样本、看各样本在各版本库里的抽取进度、按规则重建清单（不调用大模型）'),
+    'graph': ('src.graph', '正文段落 -> 抽取版本的库里每篇研报的概念和因果边（概念 DAG，调用大模型）'),
+    'unify': ('src.graph.unify_cmd', '概念 DAG 抽完后，在一个版本的库里跨研报统一同一家公司同一个概念的不同叫法（调用大模型）'),
+    'measure': ('src.measure', '一个版本的库 -> 每篇研报的逻辑结构变量（源点数、路径数、平均路径长度，原始值，不调用大模型）'),
+    'accuracy': ('src.accuracy', '样本的研报 + 分析师预测表 + 实际值 + 行情 -> 预测准确度、同行时滞、控制变量（原始值）'),
 }
 STUDY_PKG = 'src.studies'
 
 
 def usage():
     lines = ['用法：python run.py <步骤> [参数]    （python run.py <步骤> --help 看该步骤的选项）', '', '步骤：']
-    lines += [f'  {name:<8}{desc}' for name, (_, desc) in STEPS.items()]
-    lines += [f'  {"study":<8}专题研究：python run.py study <名字> [参数]，对应 {STUDY_PKG.replace(".", "/")}/<名字>/']
+    lines += [f'  {name:<9}{desc}' for name, (_, desc) in STEPS.items()]
+    lines += [f'  {"study":<9}专题研究：python run.py study <名字> [参数]，对应 {STUDY_PKG.replace(".", "/")}/<名字>/']
     return '\n'.join(lines)
 
 

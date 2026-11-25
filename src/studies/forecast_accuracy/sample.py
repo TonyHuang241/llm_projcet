@@ -4,10 +4,11 @@
 （自算的预测准确度、同行时滞、控制变量原始值），data/ 下的覆盖名单和行业表，以及外部的预测误差文件 data/forecast_errors.parquet
 （被解释变量，读取和整理见 errors.py）。
 
-研究范围（scope，791 篇）
-  公司在 data/hs300_2024_dag_covered.csv 里、且 graph 研报表 n_edges > 0（至少有一条进图的边）的研报；行序同
-  src.graph.load.read_table('reports')（deep 在前、pilot 在后，运行内按文件行序）。回归的行序就是这个顺序（求和顺序影响
-  浮点数的末位，所以保持不变）。
+研究范围（scope；样本 hs300_deep、版本 v1 时 791 篇）
+  样本（--sample，默认 hs300_deep）里 graph 研报表 n_edges > 0（至少有一条进图的边）的研报；样本登记了公司名单
+  （src/samples 的 companies，hs300_deep 是 data/hs300_2024_dag_covered.csv 的 241 家）时再限定在名单里的公司。
+  行序同 src.graph.load.read_table('reports', 样本)（按样本登记的版本顺序拼接，hs300_deep 是 v1 在前、v0 在后，版本内按库的
+  文件行序）。回归的行序就是这个顺序（求和顺序影响浮点数的末位，所以保持不变）。
   broker_g  在这 791 篇里按 graph 研报表的 broker 计数，不少于 MIN_BROKER 篇的用券商名，否则记“其他”。
   sw        申万一级行业：data/market_data/industry.xlsx（Wind 导出），缺的两只按 MANUAL_INDUSTRY 补。
   month     发布月份 YYYY-MM。
@@ -68,11 +69,10 @@ import numpy as np
 import pandas as pd
 
 from src.accuracy.forecasts import HORIZONS
-from src.config import DATA_DIR
+from src.config import DATA_DIR, DEFAULT_SAMPLE
 from src.ols import winsor
 from src.studies.forecast_accuracy import errors
 
-COVERED = DATA_DIR / 'hs300_2024_dag_covered.csv'  # DAG 覆盖的沪深300 成分股（241 家）
 INDUSTRY = DATA_DIR / 'market_data' / 'industry.xlsx'  # 申万一级行业（2021）、证监会门类
 MANUAL_INDUSTRY = {'600837': ('金融业', '非银金融'), '601989': ('制造业', '国防军工')}  # 行业表里没有的两只（2025 年退市）：（证监会门类，申万一级）
 MIN_BROKER = 5  # 研究范围内不足这么多篇的券商并成“其他”
@@ -156,23 +156,26 @@ def load_industry(path=INDUSTRY):
 
 
 # ---------------------------------------------------------------- 研究范围
-def scope(log1p=False):
-    """研究范围的 791 篇研报（行序同 graph 研报表），合并 accuracy 的全部列和 measure 的六个变量、两个路径条数的原始值
-    （列名同上游，未缩尾；路径条数转成 float）；另加 broker_g、sw、month。log1p=True 时 LOG1P_X 四列换成 ln(1 + 原始值)。"""
+def scope(log1p=False, sample=DEFAULT_SAMPLE, version=None):
+    """研究范围的研报（hs300_deep、v1 时 791 篇；行序同 graph 研报表），合并 accuracy 的全部列和 measure 的六个变量、两个路径
+    条数的原始值（列名同上游，未缩尾；路径条数转成 float）；另加 broker_g、sw、month。log1p=True 时 LOG1P_X 四列换成
+    ln(1 + 原始值)。sample、version：从哪个样本、哪个抽取版本读上游成品（version 见 src/samples 的 assignment）。"""
+    from src import samples
     from src.accuracy.load import report_accuracy
     from src.graph.load import read_table
     from src.measure.load import read_measures
 
-    r = read_table('reports', columns=['stock_code', 'date', 'broker', 'n_edges'])
-    covered = set(pd.read_csv(COVERED, dtype=str).stock_code.str[:6])
+    r = read_table('reports', sample, columns=['stock_code', 'date', 'broker', 'n_edges'], version=version)
     r = r.assign(code=r.stock_code.str[:6])
-    r = r[r.code.isin(covered) & (r.n_edges > 0)].reset_index(drop=True)
+    companies = samples.spec(sample)['companies']
+    covered = r.code.isin(set(pd.read_csv(companies, dtype=str).stock_code.str[:6])) if companies else True
+    r = r[covered & (r.n_edges > 0)].reset_index(drop=True)
     bc = r.broker.value_counts()
     r['broker_g'] = np.where(r.broker.map(bc) >= MIN_BROKER, r.broker, '其他')
     r['sw'] = r.code.map(load_industry().set_index('code').sw)
     r['month'] = r.date.str[:4] + '-' + r.date.str[4:6]
-    acc = report_accuracy().drop(columns=['code', 'date', 'broker'])
-    meas = read_measures(X6 + NPATHS + ['HAS_RATING_NODE', 'RATING_STRICT_SINK'])
+    acc = report_accuracy(sample=sample).drop(columns=['code', 'date', 'broker'])
+    meas = read_measures(X6 + NPATHS + ['HAS_RATING_NODE', 'RATING_STRICT_SINK'], sample=sample, version=version)
     meas[NPATHS] = meas[NPATHS].astype(float)
     if log1p:
         meas[LOG1P_X] = np.log1p(meas[LOG1P_X])
@@ -220,7 +223,7 @@ def winsor_by(df, cols, universe):
     return bounds
 
 
-def pair_sample(S, rows):
+def pair_sample(S, rows, sample=DEFAULT_SAMPLE):
     """公司-券商层面的回归样本（760 对，按 code、ORG_CL 排序；口径见模块说明）。rows = errors.read_rows 读出的数据文件行。"""
     from src.accuracy.load import pair_accuracy
 
@@ -231,7 +234,7 @@ def pair_sample(S, rows):
     last = s.sort_values(['code', 'ORG_CL', 'date', 'report_id']).groupby(['code', 'ORG_CL']).tail(1)
     last = last[['code', 'ORG_CL', 'report_id', 'date'] + X6].rename(columns={'report_id': 'X_report_id', 'date': 'X_report_dt',
                                                                               **{x: x + '_RAW' for x in X6}})
-    pa = pair_accuracy()
+    pa = pair_accuracy(sample=sample)
     pa = pa[['code', 'ORG_CL', 'n_reports', 'last_deep_dt', hv('PMAFE')] + [hv(v) for v in PAIR_KEEP + PAIR_STRIP]]
     pa = pa.rename(columns={hv(v): v for v in PAIR_STRIP})
     P = (P.merge(pa, on=['code', 'ORG_CL'], how='left', validate='1:1')
@@ -257,10 +260,10 @@ def pair_sample(S, rows):
     return P[cols]
 
 
-def build(log1p=False):
-    """(研究范围 791 篇, 研报层面样本, 公司-券商层面样本, 数据文件里用到的行)。log1p 见模块说明。
+def build(log1p=False, sample=DEFAULT_SAMPLE, version=None):
+    """(研究范围 791 篇, 研报层面样本, 公司-券商层面样本, 数据文件里用到的行)。log1p 见模块说明；sample、version 同 scope。
     数据文件的行 = report_id 属于研究范围或公司-券商层面被评价预测（EVAL_RPT_ID_H{MAIN_H}）的全部行（不管 sec）。"""
     from src.accuracy.load import pair_accuracy
-    S = scope(log1p)
-    rows = errors.read_rows(set(S.report_id) | set(pair_accuracy(columns=[hv('EVAL_RPT_ID')])[hv('EVAL_RPT_ID')].dropna()))
-    return S, report_sample(S, rows), pair_sample(S, rows), rows
+    S = scope(log1p, sample, version)
+    rows = errors.read_rows(set(S.report_id) | set(pair_accuracy(columns=[hv('EVAL_RPT_ID')], sample=sample)[hv('EVAL_RPT_ID')].dropna()))
+    return S, report_sample(S, rows), pair_sample(S, rows, sample), rows

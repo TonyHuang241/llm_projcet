@@ -1,6 +1,7 @@
 """步骤 accuracy：分析师盈利预测准确度和控制变量（变量层，只出原始值）。
 
-研报范围 = graph 步骤能读到的全部研报（src/graph/load.py，deep 和 pilot 两次运行合并，同一篇取 deep 的），公司代码 = 研报表
+研报范围 = 样本清单里的全部研报（--sample，默认 hs300_deep；src/graph/load.py 按清单从各版本的库里读研报表，样本里还没有
+抽取结果的研报不在内），与抽取版本无关（只用研报表的代码、日期、券商）。公司代码 = 研报表
 stock_code 的前 6 位，发布日 = 研报表的 date。对每篇研报匹配它本身在 data/EST_COMP_TN 里的预测行（RPT_YR_T 记为 T），按预测窗口
 H1、H2、H3（第 h 年预测 PROFIT_Th，目标年度 T + h，逐篇不同）分别算绝对预测误差、相对同行的预测误差 PMAFE、排名分数 Score、
 同行时滞 PeerLag，另算六个控制变量；对研报出现过的每个（公司，券商）按窗口 h 算券商 2024 年内最后一条第 h 年预测的 PMAFE、
@@ -10,28 +11,30 @@ H1、H2、H3（第 h 年预测 PROFIT_Th，目标年度 T + h，逐篇不同）�
 这里不做任何依赖样本的处理：不缩尾、不标准化、不选回归样本，也不给券商分组、不配行业（这些在研究层 src/studies/ 里做）；
 基础样本标记 base 逐篇可判定，作为一列给出。
 
-结果写到 output/accuracy/：report_accuracy.parquet（每篇研报一行）、report_peers.parquet（同行明细）、pair_accuracy.parquet
-（每个公司-券商对一行）。各列的含义见 src/accuracy/load.py，下游读结果也用它。
+结果写到 output/accuracy/<样本>/：report_accuracy.parquet（每篇研报一行）、report_peers.parquet（同行明细）、
+pair_accuracy.parquet（每个公司-券商对一行），另有 manifest.json（样本、篇数、各版本篇数、生成时间）。各列的含义见
+src/accuracy/load.py，下游读结果也用它。
 
 在仓库根目录运行：
-    python run.py accuracy                     全部重算（十几秒），覆盖 output/accuracy/ 下的三张表
-    python run.py accuracy --output 目录        另写到别的目录（核对用）
+    python run.py accuracy                       默认样本 hs300_deep，全部重算（十几秒），覆盖 output/accuracy/hs300_deep/ 下的三张表
+    python run.py accuracy --sample hs300_full   另一个样本，写 output/accuracy/hs300_full/
+    python run.py accuracy --output 目录          另写到别的目录（核对用）
 """
-from src.config import out_dir
+from src.config import DEFAULT_SAMPLE, accuracy_dir
 
 STEP = 'accuracy'
 FILES = {'report': 'report_accuracy.parquet', 'peers': 'report_peers.parquet', 'pair': 'pair_accuracy.parquet'}
 
 
-def build():
-    """算出三张表，返回 (report_accuracy, report_peers, pair_accuracy)。"""
+def build(sample=DEFAULT_SAMPLE):
+    """样本的三张表，返回 (report_accuracy, report_peers, pair_accuracy)。"""
     import pandas as pd
 
     from src.accuracy import controls, forecasts, peers
     from src.accuracy.forecasts import HORIZONS
     from src.graph.load import read_table
 
-    r = read_table('reports', columns=['stock_code', 'date', 'broker'])
+    r = read_table('reports', sample, columns=['stock_code', 'date', 'broker'])
     rep = pd.DataFrame({'report_id': r.report_id, 'code': r.stock_code.str[:6], 'date': r.date, 'broker': r.broker})
     assert rep.report_id.is_unique
     codes = sorted(set(rep.code))
@@ -78,22 +81,32 @@ def columns():
 
 def add_args(ap):
     ap.description = '分析师预测准确度（PMAFE、Score、同行时滞）和控制变量的原始值：研报层面和公司-券商层面'
-    ap.add_argument('--output', default=None, help=f'输出目录，默认 output/{STEP}/')
+    ap.add_argument('--sample', default=DEFAULT_SAMPLE, help=f'样本（研报范围），默认 {DEFAULT_SAMPLE}；样本见 python run.py sample')
+    ap.add_argument('--output', default=None, help=f'输出目录，默认 output/{STEP}/<样本>/')
 
 
 def run(args):
     import time
     from pathlib import Path
 
+    from src import samples
     from src.accuracy.forecasts import HORIZONS
+    from src.graph.load import owners
     t0 = time.perf_counter()
-    out = Path(args.output) if args.output else out_dir(STEP)
+    out = Path(args.output) if args.output else accuracy_dir(args.sample)
     out.mkdir(parents=True, exist_ok=True)
-    tables = build()
+    owner = owners(args.sample)
+    n_sample = len(samples.read(args.sample))
+    if len(owner) < n_sample:
+        print(f'注意：样本 {args.sample} 的 {n_sample} 篇里有 {n_sample - len(owner)} 篇还没有抽取结果，不在这次的范围内')
+    tables = build(args.sample)
     for key, t in zip(FILES, tables):
         t.to_parquet(out / FILES[key], index=False)
         print(f'{FILES[key]}：{len(t)} 行、{t.shape[1]} 列')
     R, _, P = tables
+    counts = {v: list(owner.values()).count(v) for v in dict.fromkeys(owner.values())}
+    samples.write_manifest(out, step=STEP, sample=args.sample, version=None, n_sample=n_sample, n_reports=len(R),
+                           n_by_version=counts, note='预测准确度只和研报范围有关，与抽取版本无关；各版本篇数是研报表取自哪个库')
     print(f'研报 {len(R)} 篇：匹配到本篇预测 {int(R.matched.sum())} 篇，基础样本 {int(R.base.sum())} 篇；公司-券商对 {len(P)} 个')
     for h in HORIZONS:
         ev = P[f'EVAL_LAST_TY_H{h}'].dropna()

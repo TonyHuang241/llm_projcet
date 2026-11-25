@@ -46,6 +46,7 @@ from decimal import ROUND_HALF_UP, Decimal
 import numpy as np
 import pandas as pd
 
+from src.config import DEFAULT_SAMPLE
 from src.ols import fe_dummies, stars, t_pvalue
 from src.studies.forecast_accuracy.errors import DEFS, METRICS, yname
 from src.studies.forecast_accuracy.regressions import estimation_sample
@@ -337,13 +338,17 @@ def actual_of(D, code, year):
     return float(vals[0])
 
 
-def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic):
+def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT_SAMPLE, version=None):
     """S 研究范围，D 研报层面样本，P 公司-券商层面样本，reg 回归长表，desc 逻辑结构变量的描述性统计，dec 方差分解，
-    est 基准回归估计样本，pl / rl 图 2 的同行明细和每篇研报，schematic 图 1 例子的指标。返回 text_numbers.csv 的 DataFrame。
+    est 基准回归估计样本，pl / rl 图 2 的同行明细和每篇研报，schematic 图 1 例子的指标；sample、version：读 graph 概念表用的
+    样本和版本（同 sample.scope）。返回 text_numbers.csv 的 DataFrame。
     “内容”一栏不写具体数字（数字在“数值”“显示”里），主窗口的变量名都由 sample.MAIN_H 派生。"""
+    from src import samples
+    from src.config import ROOT_DIR
     from src.graph.load import read_table
     from src.measure.variables import RATING_NODE
     G = Reg(reg)
+    companies = samples.spec(sample)['companies']
     rows = []
     Hm = f'H{MAIN_H}'
 
@@ -363,7 +368,9 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic):
     n_est = len(est)
     base = G.cell('report', 'fe_steps', Y_MAIN, 'firm+broker', 'WG_NSRC')
     rate = G.cell('report', 'fe_steps', Y_MAIN, 'firm+broker', 'RT_NSRC')
-    add('1.1', '样本研报篇数（研究范围）', len(S), 0, '研究范围：公司在覆盖名单（data/hs300_2024_dag_covered.csv）里、graph 研报表 n_edges > 0 的研报篇数')
+    add('1.1', '样本研报篇数（研究范围）', len(S), 0,
+        f'研究范围：公司在覆盖名单（{companies.relative_to(ROOT_DIR).as_posix()}）里、graph 研报表 n_edges > 0 的研报篇数' if companies
+        else f'研究范围：样本 {sample} 里 graph 研报表 n_edges > 0 的研报篇数')
     add('1.1', '基础样本篇数', len(D), 0, '研报层面样本（匹配到本篇预测、有 H1 预测和实际值、发布于 H1 财年年报公告之前）')
     add('1.1', f'满足条件的研报篇数（主变量 {Y_MAIN} 非缺失）', int(D[Y_MAIN].notna().sum()), 0, f'基础样本中 {Y_MAIN} 非缺失的篇数')
     add('1.1（对照，非文档数字）', f'自算 {OWN_MAIN} 非缺失的篇数', int(D[OWN_MAIN].notna().sum()), 0, f'基础样本中 {OWN_MAIN} 非缺失的篇数')
@@ -372,10 +379,10 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic):
     for T, g in est.groupby('RPT_YR_T'):
         add('1.1（对照，非文档数字）', f'基准回归样本中 T = {int(T)}（{Hm} 目标年度 {int(T) + MAIN_H}）的篇数', len(g), 0,
             f'基准回归估计样本中 RPT_YR_T = {int(T)} 的篇数')
-    C = read_table('concepts', report_ids=rid, columns=['name'])
+    C = read_table('concepts', sample, report_ids=rid, columns=['name'], version=version)
     n_has = C[C.name == RATING_NODE].report_id.nunique()
     add('1.2', '抽取出“投资评级”概念的研报篇数', n_has, 0,
-        f'graph 概念表（src.graph.load.read_table("concepts")，各次运行按 RUN_ORDER 合并，含没有进图边的孤立概念）中 name == “投资评级” 的研报数（研究范围 {len(S)} 篇内）')
+        f'graph 概念表（src.graph.load.read_table("concepts")，按样本清单从各版本的库里取，含没有进图边的孤立概念）中 name == “投资评级” 的研报数（研究范围 {len(S)} 篇内）')
     add('1.2', '抽取出“投资评级”概念的研报占研究范围的比例（%）', n_has / len(S) * 100, 0, '上一行 ÷ 研究范围篇数 × 100')
     for name, key, nd, val in (('全文', '全文', 0, 'NSRC'), ('全文', '全文', 0, 'N_SINKS'), ('全文', '全文', 0, 'N_PATHS'), ('全文', '全文', 1, 'PATHLEN'),
                                ('投资评级', '投资评级', 0, 'NSRC'), ('投资评级', '投资评级', 0, 'N_PATHS'), ('投资评级', '投资评级', 1, 'PATHLEN')):

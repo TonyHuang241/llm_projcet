@@ -1,5 +1,5 @@
-"""研报概念有向无环图（DAG）抽取。提示词见 src/graph/prompts/extract.md，入口是 python run.py graph
-（运行参数和各次运行的具名配置在 src/graph/__init__.py）。
+"""抽取版本 v1 的研报概念有向无环图（DAG）抽取。提示词见本目录的 prompts/extract.md，规则参数（每块字数、ARCHIVE_VERSION）
+在本目录的 __init__.py；入口是 python run.py graph --version v1（选版本、选样本在 src/graph/__init__.py，再调用这里的 main）。
 
 每篇研报只走两步，不预设会计科目、估值等固定概念，也不做任何补全：
   0. 合并段落：python run.py text 清理出的正文段落按顺序合并成不超过 chunk_chars 字的块（单个段落超长的自成一块），
@@ -16,12 +16,16 @@
 不等其他研报；正在处理的每篇至少占一个调用，所以除了最后剩下不足 workers 篇的时候，在途调用一直是满的
 （进度日志里每分钟记一行在途调用数）。
 
-每篇研报做完即存档到 <输出目录>/cache/reports/（JSON，带指纹：段落文字、公司和标题、提示词、chunk_chars、ARCHIVE_VERSION），
+库和处理范围：库（output/graph/v1/）的全集是全部能识别公司的个股研报（src/graph/store.py 的 in_library），每次只处理
+targets 里的研报（样本清单里取自本版本的研报，或 --report-ids）：缺有效存档的才抽，其余只读存档；写输出时写库里全部有有效存档的
+研报（不只是这次处理的），所以补抽一个新样本时库里已有的研报原样保留、不重复存。targets 为空时不抽取、只用存档重写输出。
+
+每篇研报做完即存档到 <库>/cache/reports/（JSON，带指纹：段落文字、公司和标题、提示词、chunk_chars、ARCHIVE_VERSION），
 重跑时存档有效的直接读回；各次大模型调用缓存在 cache/*_cache.jsonl，重新处理的研报只补做缺少的调用。
 某一篇有调用失败时不存档、不进输出，记到 cache/failed_reports.jsonl，下次运行重试；余额不足、鉴权失败让整个运行停下。
 
-输出（<输出目录>，默认 output/graph/<运行名>/）：
-  概念DAG.html       入口页面（模板 src/graph/viewer.html），双击打开，左侧选研报，选中时才读取这一篇的数据并绘图
+输出（<库>，即 output/graph/v1/）：
+  概念DAG.html       入口页面（模板 viewer.html），双击打开，左侧选研报，选中时才读取这一篇的数据并绘图
   data/graphs/       每篇研报一个数据文件（概念、DAG 的边和引文、因成环删掉的边、正文段落），加上目录 index.js
   data/concepts.parquet、edges.parquet、reports.parquet   扁平表（各列见 write_outputs）
   cache/             调用缓存、各篇存档、出错记录、进度日志
@@ -39,11 +43,15 @@ from pathlib import Path
 import networkx as nx
 import pyarrow.parquet as pq
 
-from src.graph.common import (VIEWER_TEMPLATE, DagOut, fill, merge_direction, name_key, norm_direction, norm_name,  # noqa: F401
-                              para_block, quote_in, squash, too_many, write_js, write_parquet)
+from src.config import PARAGRAPHS, REPORTS
+from src.graph.store import in_library
 from src.llm import (LLM, STOP, Cache, CallFailed, FatalAPIError, InflightMeter, append_jsonl, load_env, log,  # noqa: F401
                      parse_json, set_log_path, text_hash, with_feedback)
 from src.text.load import load_reports, quarter_of, select_reports
+
+from . import ARCHIVE_VERSION, CHUNK_CHARS, WORKERS
+from .common import (VIEWER_TEMPLATE, DagOut, fill, merge_direction, name_key, norm_direction, norm_name,  # noqa: F401
+                     para_block, quote_in, squash, too_many, write_js, write_parquet)
 
 PROMPT_FILE = Path(__file__).resolve().parent / 'prompts' / 'extract.md'
 STEPS = ('概念', '连边')  # 每步有 “-System”“-User” 两节
@@ -53,9 +61,7 @@ MAX_DEF_LEN = 60
 MAX_EVIDENCE_LEN = 200
 MIN_QUOTE = 6  # 连边引文至少这么多个字（去掉空白和引号后）
 MAX_ALIAS_LEN = 12  # 原文叫法作别名的字数上限（再长的多半是带了数值、变化的短句，只用来核对概念出自原文）
-CHUNK_CHARS = 2500  # 合并段落时每块的字数上限
 SLOW_CALL = 120  # 一次调用超过这么多秒就在日志里记一笔（便于发现输出过长、被截断）
-ARCHIVE_VERSION = 1  # 改了流程代码、或存档结构不兼容时加一，已有的存档全部失效（调用缓存还在）
 
 
 # ==================== prompt、缓存 ====================
@@ -478,112 +484,120 @@ def output_report_ids(out):
     return set(pq.read_table(path, columns=['report_id'])['report_id'].to_pylist()) if path.exists() else set()
 
 
-def main(paras_path, out_dir, reports_path=None, select=None, limit=None, seed=0, workers=50, chunk_chars=CHUNK_CHARS,
-         min_per_quarter=1, fresh=False, dry_run=False, keep=None, archived_only=False, only=None):
-    """paras_path：python run.py text 写出的段落 parquet；reports_path：配套的研报元数据表，select(行) 为真的研报才抽取
-    （None 时不筛选）；limit、seed：在选中的研报里按种子随机抽多少篇（同 src/text/load.py 的 load_reports）；
-    workers：同时在途的大模型调用数，也是同时在处理的研报篇数；chunk_chars：合并段落时每块的字数上限；
-    min_per_quarter：同一家公司同一个季度不足这么多篇的不抽（1 表示不按这条筛）；fresh：先清空上一次的结果和存档；
-    dry_run：只统计选中的研报和合并后的块数，不调用大模型；keep(研报)：读入正文后再筛一遍，为真的才抽（如按正文字数），
-    在按 limit 抽样之前筛；archived_only：只用已有的存档写输出、不调用大模型，没有有效存档的研报这次不进输出
-    （少数研报的调用一直卡住时用，下次正常运行再补）；only：研报 ID 的列表，只处理选中的研报里的这几篇，其余研报只读存档，
-    结果照常并入同一个输出目录。这时如果换了每块字数等参数，现有结果里其余研报的存档会全部对不上、写输出会把它们去掉，
-    就改成试跑：只抽取这几篇、在日志里报告，不存档、不写输出。"""
+def sample_ids(ids, limit, seed):
+    """在 ids 里按种子随机抽 limit 篇（按 md5(种子:report_id) 排序取前 limit 篇，同一个种子下抽得少的总是抽得多的子集，
+    同 src/text/load.py 的 load_reports）。"""
+    return set(sorted(ids, key=lambda rid: hashlib.md5(f'{seed}:{rid}'.encode('utf-8')).hexdigest())[:limit])
+
+
+def listing(items, n=20):
+    """日志里列举时最多列 n 个。"""
+    items = list(items)
+    return '、'.join(items[:n]) + (f' 等 {len(items)} 篇' if len(items) > n else '')
+
+
+def main(out_dir, targets=(), chunk_chars=CHUNK_CHARS, workers=WORKERS, limit=None, seed=0, fresh=False, dry_run=False,
+         archived_only=False, note='', paras_path=PARAGRAPHS, reports_path=REPORTS):
+    """out_dir：本版本的库；targets：这次要处理的研报 ID（大小写不敏感，要在库的全集里），空表示不抽取、只用存档重写输出；
+    chunk_chars：合并段落时每块的字数上限（默认本版本的 CHUNK_CHARS；换了会让库里的存档对不上，见下面的试跑）；
+    workers：同时在途的大模型调用数，也是同时在处理的研报篇数；limit、seed：在 targets 里按种子随机抽多少篇（sample_ids）；
+    fresh：先清空库里的结果和全部存档（调用缓存保留；确认由调用方负责）；dry_run：只统计，不调用大模型；
+    archived_only：只用已有的存档写输出、不调用大模型，没有有效存档的研报这次不进输出（少数研报的调用一直卡住时用）；
+    note：调用方对处理范围的说明（写进日志）。
+    库的现有结果里如果有研报的存档按这次的参数对不上（换了每块字数、提示词，或段落文字变了），写输出会把它们去掉，
+    这时改成试跑：只抽取 targets 里缺存档的研报、在日志里报告，不存档、不写输出。"""
     t0 = time.time()
     out = DagOut(out_dir)
-    if only and fresh:
-        raise SystemExit('--fresh 会清空这次运行的全部结果和存档，不能和 --report-ids 一起用')
-    info, note = select_reports(reports_path, select, min_per_quarter)
-    reports, _ = load_reports(paras_path, None if keep else limit, info, seed)
-    if keep:
-        n0 = len(reports)
-        reports = [r for r in reports if keep(r)]
-        note += f'；读入正文后剔除 {n0 - len(reports)} 篇（{getattr(keep, 'note', None) or (keep.__doc__ or 'keep').strip().splitlines()[0]}），剩 {len(reports)} 篇'
-        if limit is not None:  # 抽样方式同 load_reports
-            ids = set(sorted((r.rid for r in reports), key=lambda rid: hashlib.md5(f'{seed}:{rid}'.encode('utf-8')).hexdigest())[:limit])
-            reports = [r for r in reports if r.rid in ids]
-    if not reports:
-        raise SystemExit(f'{note}；没有可抽取的研报')
-    if only:
-        by_upper = {r.rid.upper(): r.rid for r in reports}
-        unknown = [x for x in only if x.upper() not in by_upper]
-        if unknown:
-            raise SystemExit(f'{note}；--report-ids 里这些研报不在其中（ID 写错了，或这次运行的选样没有选中它）：{"、".join(unknown)}')
-        only = {by_upper[x.upper()] for x in only}
-        note += f'；--report-ids：只处理其中 {len(only)} 篇，其余研报只读存档'
-    targets = [r for r in reports if not only or r.rid in only]  # 这次要处理的研报（统计和日志按它算）
+    info, lib_note = select_reports(reports_path, in_library)
+    reports, _ = load_reports(paras_path, None, info)
+    lib_note += f'（库的全集：能识别公司的个股研报），有正文段落的 {len(reports)} 篇'
+    by_upper = {r.rid.upper(): r.rid for r in reports}
+    unknown = [x for x in targets if x.upper() not in by_upper]
+    if unknown:
+        raise SystemExit(f'{lib_note}；这些研报不在库的全集里（ID 写错了，或不是能识别公司的个股研报、没有正文段落）：{listing(unknown)}')
+    only = {by_upper[x.upper()] for x in targets}
+    if limit is not None:
+        only = sample_ids(only, limit, seed)
+        note += f'；按种子 {seed} 随机抽 {len(only)} 篇试跑'
+    if fresh and not dry_run:
+        clear_results(out)
+    targets = [r for r in reports if r.rid in only]  # 这次要处理的研报（统计和日志按它算）
     for r in reports:
         r.chunks = make_chunks(r.paras, chunk_chars)
-    n_paras, n_chunks = sum(len(r.paras) for r in targets), sum(len(r.chunks) for r in targets)
-    summary = (f'{len(targets)} 篇研报、{len({r.meta["stock_code"] for r in targets})} 家公司；{n_paras} 个段落合并成 '
-               f'{n_chunks} 块（每块不超过 {chunk_chars} 字），每块抽概念、连边各一次调用')
-    if dry_run:
-        print(note)
-        print(summary)
-        by_c = defaultdict(lambda: [0, 0, 0])
-        for r in targets:
-            x = by_c[(r.meta['stock_code'], r.meta['company'])]
-            x[0], x[1], x[2] = x[0] + 1, x[1] + len(r.paras), x[2] + len(r.chunks)
-        for (code, name), (n, p, c) in sorted(by_c.items(), key=lambda kv: kv[1][0]):
-            print(f'  {code} {name}：{n} 篇，{p} 段 -> {c} 块')
-        print('只做了统计，没有调用大模型；去掉 --dry-run 才开始抽取')
-        return
-    if fresh:
-        clear_results(out)
-    out.make()
-    set_log_path(out.log)
-    env = load_env()
-    ctx = Ctx(env, out, workers, chunk_chars)
-    log(f'===== 概念 DAG 抽取开始：模型 {env["MODEL"]}，{summary}；并发 {workers} =====')
-    log(note)
-
     base = archive_base(chunk_chars)
     sigs = {r.rid: archive_sig(r, base) for r in reports}
     done = {r.rid: r for r in reports if read_archive(out, r, sigs[r.rid])}
-    todo = sorted((r for r in reports if r.rid not in done), key=lambda r: (-len(r.chunks), -len(r.paras), r.rid))
-    trial = False
-    if only:
-        todo = [r for r in todo if r.rid in only]
-        have = output_report_ids(out)
-        lost = [r for r in reports if r.rid in have and r.rid not in done and r.rid not in only]
-        if lost:
-            trial = True
-            log(f'试跑：现有结果里另有 {len(lost)} 篇的存档按这次的参数对不上（每块字数、提示词或段落文字变了），写输出会把它们去掉；'
-                '这次只抽取这几篇、在日志里报告，不存档、不写输出')
-    log(f'从存档读回 {len(done)} 篇，本次待处理 {len(todo)} 篇、{sum(len(r.chunks) for r in todo)} 块（长研报先开始）')
+    todo = sorted((r for r in targets if r.rid not in done), key=lambda r: (-len(r.chunks), -len(r.paras), r.rid))
+    lost = sorted(rid for rid in output_report_ids(out) if rid not in done and rid not in only)
+    trial = bool(lost)
+    summary = (f'这次要处理 {len(targets)} 篇研报（{len({r.meta["stock_code"] for r in targets})} 家公司）：已有有效存档 '
+               f'{len(targets) - len(todo)} 篇，待抽 {len(todo)} 篇、{sum(len(r.paras) for r in todo)} 个段落合并成 '
+               f'{sum(len(r.chunks) for r in todo)} 块（每块不超过 {chunk_chars} 字），每块抽概念、连边各一次调用；'
+               f'库里现有有效存档 {len(done)} 篇')
+    trial_note = (f'试跑：库的现有结果里有 {len(lost)} 篇的存档按这次的参数对不上（每块字数、提示词或段落文字变了），写输出会把它们'
+                  '去掉；所以只抽取待抽的研报、在日志里报告，不存档、不写输出')
+    if dry_run:
+        print(lib_note)
+        if note:
+            print(note.lstrip('；'))
+        print(summary)
+        by_c = defaultdict(lambda: [0, 0, 0])
+        for r in todo:
+            x = by_c[(r.meta['stock_code'], r.meta['company'])]
+            x[0], x[1], x[2] = x[0] + 1, x[1] + len(r.paras), x[2] + len(r.chunks)
+        rows = sorted(by_c.items(), key=lambda kv: (-kv[1][0], kv[0]))
+        if rows:
+            print(f'待抽的研报按公司（篇数最多的 {min(len(rows), 20)} 家，共 {len(rows)} 家）：')
+        for (code, name), (n, p, c) in rows[:20]:
+            print(f'  {code} {name}：{n} 篇，{p} 段 -> {c} 块')
+        if trial:
+            print(trial_note)
+        if fresh:
+            print(f'--fresh 会先清空 {out.data} 和 {out.reports}（库里全部 {len(done)} 篇的存档），调用缓存保留')
+        print('只做了统计，没有调用大模型；去掉 --dry-run 才开始抽取')
+        return
+    out.make()
+    set_log_path(out.log)
+    env = load_env()  # 只读 .env（模型名写进页面目录）；没有待抽的研报时不建大模型客户端、不发任何请求
+    log(f'===== 概念 DAG 抽取开始：库 {out.root}，模型 {env["MODEL"]}；{summary}；并发 {workers} =====')
+    log(lib_note + note)
+    if trial:
+        log(trial_note + '；例如：' + listing(lost))
     if archived_only and todo:
-        log(f'只用存档：{len(todo)} 篇没有有效存档，这次不抽、不进输出：' + '、'.join(f'{r.meta["company"]} {r.rid[:8]}' for r in todo))
+        log(f'只用存档：{len(todo)} 篇没有有效存档，这次不抽、不进输出：' + listing(f'{r.meta["company"]} {r.rid[:8]}' for r in todo))
         todo = []
 
     failed, fatal = {}, None
-    ctx.pool = ThreadPoolExecutor(max_workers=workers)
-    runner = ThreadPoolExecutor(max_workers=max(1, min(workers, len(todo))))
-    try:
-        futures = {runner.submit(process, ctx, r): r for r in todo}
-        for k, fut in enumerate(as_completed(futures), 1):
-            r = futures[fut]
-            try:
-                fut.result()
-            except (FatalAPIError, SystemExit) as e:
-                fatal = fatal or e
-                continue
-            except Exception as e:
-                err = f'{type(e).__name__}: {e}'
-                failed[r.rid] = err
-                append_jsonl(out.failed, {'report_id': r.rid, 'error': err, 'time': time.strftime('%Y-%m-%d %H:%M:%S')})
-                log(f'!!! {r.rid} 出错，不存档、不进输出（下次运行重试）：{err[:300]}')
-                continue
-            if not trial:
-                write_archive(out, r, sigs[r.rid])
-            done[r.rid] = r
-            s, u = r.stats, ctx.llm.usage
-            log(f'已做完 {k}/{len(todo)} 篇：{r.meta["company"]} {r.meta["date"]} {r.meta["broker"]}，{len(r.paras)} 段 {s["n_chunks"]} 块；'
-                f'概念 {s["n_concepts"]} 个、进图 {s["n_nodes"]} 个，边 {s["n_edges"]} 条（成环删 {s["n_removed"]} 条），'
-                f'最长链 {s["longest"]} 步；累计调用 {u["calls"]} 次，用时 {time.time() - t0:.0f} 秒')
-    finally:
-        runner.shutdown(wait=True, cancel_futures=True)
-        ctx.pool.shutdown(wait=True, cancel_futures=True)
-        ctx.meter.close()
+    if todo:
+        ctx = Ctx(env, out, workers, chunk_chars)
+        ctx.pool = ThreadPoolExecutor(max_workers=workers)
+        runner = ThreadPoolExecutor(max_workers=max(1, min(workers, len(todo))))
+        try:
+            futures = {runner.submit(process, ctx, r): r for r in todo}
+            for k, fut in enumerate(as_completed(futures), 1):
+                r = futures[fut]
+                try:
+                    fut.result()
+                except (FatalAPIError, SystemExit) as e:
+                    fatal = fatal or e
+                    continue
+                except Exception as e:
+                    err = f'{type(e).__name__}: {e}'
+                    failed[r.rid] = err
+                    append_jsonl(out.failed, {'report_id': r.rid, 'error': err, 'time': time.strftime('%Y-%m-%d %H:%M:%S')})
+                    log(f'!!! {r.rid} 出错，不存档、不进输出（下次运行重试）：{err[:300]}')
+                    continue
+                if not trial:
+                    write_archive(out, r, sigs[r.rid])
+                done[r.rid] = r
+                s, u = r.stats, ctx.llm.usage
+                log(f'已做完 {k}/{len(todo)} 篇：{r.meta["company"]} {r.meta["date"]} {r.meta["broker"]}，{len(r.paras)} 段 {s["n_chunks"]} 块；'
+                    f'概念 {s["n_concepts"]} 个、进图 {s["n_nodes"]} 个，边 {s["n_edges"]} 条（成环删 {s["n_removed"]} 条），'
+                    f'最长链 {s["longest"]} 步；累计调用 {u["calls"]} 次，用时 {time.time() - t0:.0f} 秒')
+        finally:
+            runner.shutdown(wait=True, cancel_futures=True)
+            ctx.pool.shutdown(wait=True, cancel_futures=True)
+            ctx.meter.close()
     if fatal is not None:
         log(f'!!! 致命错误，已停止：{fatal}。已做完的研报都已存档，处理后重新运行即接着跑')
         raise SystemExit(1)
@@ -593,15 +607,21 @@ def main(paras_path, out_dir, reports_path=None, select=None, limit=None, seed=0
         return
     finished = [done[r.rid] for r in reports if r.rid in done]
     if not finished:
-        raise SystemExit('没有完成的研报，见上面的日志')
+        raise SystemExit('库里没有有效存档的研报，见上面的日志')
     write_outputs(out, finished, env['MODEL'])
-    u = ctx.llm.usage
     st = [r.stats for r in finished]
     avg = lambda k: sum(s[k] for s in st) / len(st)
-    log(f'===== 结束：输出 {len(finished)} 篇（出错 {len(failed)} 篇）；平均每篇概念 {avg("n_concepts"):.1f} 个、进图 {avg("n_nodes"):.1f} 个、'
-        f'边 {avg("n_edges"):.1f} 条、成环删边 {avg("n_removed"):.2f} 条、最长链 {avg("longest"):.1f} 步；本次调用 {u["calls"]} 次'
-        f'（不合格重试 {u["retries"]} 次），输入 {u["prompt_tokens"]} tokens、输出 {u["completion_tokens"]} tokens；'
-        f'用时 {time.time() - t0:.0f} 秒 =====')
-    for step, errs in ctx.retry_errors.items():
-        log(f'{step}：回复不合格、让模型重做 {len(errs)} 次，例如：' + ' ／ '.join(errs[:3]))
+    msg = (f'===== 结束：输出库里全部 {len(finished)} 篇（这次新抽 {len(todo) - len(failed)} 篇、出错 {len(failed)} 篇）；'
+           f'平均每篇概念 {avg("n_concepts"):.1f} 个、进图 {avg("n_nodes"):.1f} 个、边 {avg("n_edges"):.1f} 条、'
+           f'成环删边 {avg("n_removed"):.2f} 条、最长链 {avg("longest"):.1f} 步；')
+    if todo:
+        u = ctx.llm.usage
+        msg += (f'本次调用 {u["calls"]} 次（不合格重试 {u["retries"]} 次），输入 {u["prompt_tokens"]} tokens、'
+                f'输出 {u["completion_tokens"]} tokens；')
+    else:
+        msg += '没有调用大模型；'
+    log(msg + f'用时 {time.time() - t0:.0f} 秒 =====')
+    if todo:
+        for step, errs in ctx.retry_errors.items():
+            log(f'{step}：回复不合格、让模型重做 {len(errs)} 次，例如：' + ' ／ '.join(errs[:3]))
     log(f'页面：{out.viewer}（双击打开）；结果数据在 {out.data}')

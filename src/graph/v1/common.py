@@ -1,5 +1,6 @@
-"""概念 DAG 抽取（extract.py）和名称统一（unify.py）共用、又不属于大模型调用的部分：输出目录的布局、名称和引文的规范化与核对、
-提示词填空、写 parquet / js 等小函数。读本步骤成品的函数在 load.py。"""
+"""抽取版本 v1 里概念 DAG 抽取（extract.py）和名称统一（unify.py）共用、又不属于大模型调用的部分：名称和引文的规范化与核对、
+提示词填空、写 parquet / js 等小函数。库目录的布局（DagOut）是各版本共用的，在 src/graph/store.py，这里转引；
+读成品的函数在 src/graph/load.py。"""
 import json
 import re
 import unicodedata
@@ -8,29 +9,12 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.graph.store import DagOut  # noqa: F401（各版本共用的库目录布局，extract.py、unify.py 从这里引用）
+
 VIEWER_TEMPLATE = Path(__file__).resolve().parent / 'viewer.html'  # 查看页面的模板，复制到输出目录最外层的 概念DAG.html
 DIRECTIONS = {'正向': 1, '负向': -1}
 DIRECTION_ALIASES = {'正': '正向', '+': '正向', 'positive': '正向', '正相关': '正向',
                      '负': '负向', '-': '负向', 'negative': '负向', '负相关': '负向', '反向': '负向'}
-
-
-class DagOut:
-    """输出目录的布局。"""
-
-    def __init__(self, root):
-        self.root = Path(root)
-        self.viewer = self.root / '概念DAG.html'
-        self.data = self.root / 'data'
-        self.graphs = self.data / 'graphs'
-        self.cache = self.root / 'cache'
-        self.reports = self.cache / 'reports'
-        self.failed = self.cache / 'failed_reports.jsonl'
-        self.log = self.cache / 'progress.log'
-
-    def make(self):
-        for d in (self.data, self.cache):
-            d.mkdir(parents=True, exist_ok=True)
-        return self
 
 
 # ==================== 名称和引文 ====================

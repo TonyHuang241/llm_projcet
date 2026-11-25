@@ -1,4 +1,4 @@
-"""文档的两张图（写到 docs/figures/，文件名固定）。
+"""文档的两张图（写到研究输出目录的 figures/，即 output/studies/forecast_accuracy/<样本>_<版本>[_log1p]/figures/，文件名固定）。
 
 图 1  logic_structure_schematic.png：逻辑结构变量的构建。用一个虚构的小图说明源点数、路径数、平均路径长度怎么数，并对比全文
       逻辑结构与投资评级概念对应的逻辑结构。数值用 src.measure.variables.graph_measures 计算（target=None 为全文，
@@ -16,11 +16,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.config import ROOT_DIR
+from src.config import DEFAULT_SAMPLE
 
-FIG_DIR = ROOT_DIR / 'docs' / 'figures'
-FIG1 = FIG_DIR / 'logic_structure_schematic.png'
-FIG2 = FIG_DIR / 'peer_lag_distribution.png'
+FIG_SUBDIR = 'figures'  # 图在研究输出目录下的子目录（文档 md 用相对路径 figures/<文件名> 引用）
+FIG1 = Path(FIG_SUBDIR) / 'logic_structure_schematic.png'
+FIG2 = Path(FIG_SUBDIR) / 'peer_lag_distribution.png'
 
 # ==================== 图 1：示意图 ====================
 CHAIN_Y = 2.5
@@ -230,15 +230,15 @@ def schematic(out=FIG1):
 
 
 # ==================== 图 2：同行时滞分布 ====================
-def peer_lag_frames(est):
-    """est：基准回归的估计样本（研报层面样本的行）。返回 (同行明细, 每篇研报)：
+def peer_lag_frames(est, sample=DEFAULT_SAMPLE):
+    """est：基准回归的估计样本（研报层面样本的行）；sample：读哪个样本的 accuracy 成品。返回 (同行明细, 每篇研报)：
     同行明细（主窗口 MAIN_H 的比较组）：report_id、code、report_dt、report_ORG_CL、ORG_CL（同行券商）、peer_RPT_ID、peer_dt、LAG、F；
     每篇研报：report_id、code、ORG_CL、report_dt、month、n_peers、LAG_MEAN（= PeerLag 缩尾前）、LAG_MEDIAN、LAG_MIN、LAG_MAX、
     SHARE_LE7、SHARE_LE30、RT_NSRC、WG_NSRC（缩尾前），按 report_dt、report_id 排序。"""
     from src.accuracy.load import report_peers
     from src.studies.forecast_accuracy.sample import MAIN_H
     rep = est[['report_id', 'code', 'ORG_CL', 'date', 'RT_NSRC_RAW', 'WG_NSRC_RAW']]
-    pr = report_peers()
+    pr = report_peers(sample=sample)
     pr = pr[pr.h == MAIN_H].drop(columns=['h', 'ty'])
     pl = rep.merge(pr, on='report_id', how='inner', validate='1:m')
     pl = pl.rename(columns={'date': 'report_dt', 'ORG_CL': 'report_ORG_CL', 'peer_ORG_CL': 'ORG_CL'})

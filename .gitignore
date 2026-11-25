@@ -1,10 +1,22 @@
 # 数据、结果和文献 PDF（体积大，不入 git）；literature/ 下的文献梳理和笔记入 git
 /data/
-/output/
 /literature/**/*.pdf
+
+# output/ 下只跟踪研究文档（md、pdf、figures/ 里的图）和 output/archive/ 下的全部，其余结果不入 git
+/output/**
+!/output/**/
+!/output/studies/**/*.md
+!/output/studies/**/*.pdf
+!/output/studies/**/figures/*.png
+!/output/studies/**/figures/*.svg
+!/output/studies/**/figures/*.jpg
+!/output/archive/**
 
 # 敏感信息、本机配置与缓存
 .env
 .claude/
 __pycache__/
 *.pyc
+
+# 本地备份（重构前的输出与文档快照）
+/_backup/
