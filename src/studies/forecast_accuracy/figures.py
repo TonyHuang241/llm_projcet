@@ -5,8 +5,9 @@
       target=RATING_NODE 为投资评级子图），并与手算结果 assert 相等；各条路径及其边数由 networkx 穷举简单路径得到，再与之核对。
       图上：源点排在最左一列，列标题写源点数；每条源点到汇点的路径一种颜色、编号 ①–⑤，共用的边画成平行的彩色线；每条路径在源点
       左侧有同色标签写边数；面板内三行汇总；(b) 中不属于投资评级逻辑结构的概念、路径和标签画成浅灰虚线。
-图 2  peer_lag_distribution.png：研报发布前 90 天内同行预测的时滞分布。样本 = 基准回归（表 2）的估计样本（709 篇），同行 =
-      accuracy 步骤 report_peers 里这些研报的 FY2025、[d − 90, d] 比较组同行（PMAFE_FY25、PeerLag 用的就是它们）；
+图 2  peer_lag_distribution.png：研报发布前 90 天内同行预测的时滞分布。样本 = 基准回归（表 5，主变量 sample.Y_MAIN）的估计样本，同行 =
+      accuracy 步骤 report_peers 里这些研报在主窗口（h = sample.MAIN_H，目标年度 TY_Hh 逐篇不同）、[d − 90, d] 比较组的同行
+      （自算的主窗口 PMAFE 和各回归控制的 PeerLag 用的就是它们）；
       (a) 全部同行预测的时滞（研报发布日 − 同行预测发布日），(b) 每篇研报同行时滞的均值（PeerLag 缩尾前的值），虚线为中位数。
 """
 import math
@@ -231,12 +232,14 @@ def schematic(out=FIG1):
 # ==================== 图 2：同行时滞分布 ====================
 def peer_lag_frames(est):
     """est：基准回归的估计样本（研报层面样本的行）。返回 (同行明细, 每篇研报)：
-    同行明细：report_id、code、report_dt、report_ORG_CL、ORG_CL（同行券商）、peer_RPT_ID、peer_dt、LAG、F；
+    同行明细（主窗口 MAIN_H 的比较组）：report_id、code、report_dt、report_ORG_CL、ORG_CL（同行券商）、peer_RPT_ID、peer_dt、LAG、F；
     每篇研报：report_id、code、ORG_CL、report_dt、month、n_peers、LAG_MEAN（= PeerLag 缩尾前）、LAG_MEDIAN、LAG_MIN、LAG_MAX、
     SHARE_LE7、SHARE_LE30、RT_NSRC、WG_NSRC（缩尾前），按 report_dt、report_id 排序。"""
     from src.accuracy.load import report_peers
+    from src.studies.forecast_accuracy.sample import MAIN_H
     rep = est[['report_id', 'code', 'ORG_CL', 'date', 'RT_NSRC_RAW', 'WG_NSRC_RAW']]
     pr = report_peers()
+    pr = pr[pr.h == MAIN_H].drop(columns=['h', 'ty'])
     pl = rep.merge(pr, on='report_id', how='inner', validate='1:m')
     pl = pl.rename(columns={'date': 'report_dt', 'ORG_CL': 'report_ORG_CL', 'peer_ORG_CL': 'ORG_CL'})
     pl = pl[['report_id', 'code', 'report_dt', 'report_ORG_CL', 'ORG_CL', 'peer_RPT_ID', 'peer_dt', 'LAG', 'F']].reset_index(drop=True)

@@ -11,6 +11,7 @@ src/
   config.py                 目录约定、跨步骤共用的数据文件路径
   llm.py                    大模型调用：接口、并发、调用缓存、不合格时重试
   ols.py                    固定效应 OLS、聚类标准误、缩尾（各项研究共用）
+  mdpdf.py                  文档 md → HTML → 本机 Chrome / Edge 无头打印成 PDF（各项研究共用）
   text/                     研报纯文本 → 段落表、元数据表
     clean.py  meta.py  load.py
   graph/                    段落 → 每篇研报的概念和因果边
@@ -21,7 +22,7 @@ src/
     forecasts.py  peers.py  controls.py  load.py
   studies/
     forecast_accuracy/      对应 docs/研报逻辑结构与分析师预测准确度.md
-      sample.py  regressions.py  tables.py  figures.py
+      sample.py  errors.py  regressions.py  tables.py  figures.py
 docs/                       核心文档和 figures/；archive/ 是已不维护的旧文档
 literature/                 参考文献，按主题分目录：文献梳理和笔记入 git，PDF 不入 git
 data/                       输入数据（不入 git）
@@ -40,10 +41,30 @@ output/                     各步骤的结果（不入 git）：output/<步骤>
 | `python run.py unify` | 跨研报统一概念名称（可选） | `output/graph/<运行名>/` | 同一目录 | 是 | — |
 | `python run.py measure` | 逻辑结构变量 | `output/graph/` | `output/measure/` | 否 | 3 秒 |
 | `python run.py accuracy` | 预测准确度和控制变量 | `data/` 的预测表、行情、财务 | `output/accuracy/` | 否 | 15 秒 |
-| `python run.py study forecast_accuracy` | 样本、回归、文档的表和图 | `output/measure/`、`output/accuracy/` | `output/studies/forecast_accuracy/`、`docs/figures/` | 否 | 30 秒 |
+| `python run.py study forecast_accuracy` | 样本、描述性统计、方差分解、回归、文档的表和图（分环节，见下文） | `output/graph/`、`output/measure/`、`output/accuracy/`、`data/`（含 `forecast_errors.parquet`） | `output/studies/forecast_accuracy/`、`docs/figures/` | 否 | 1.5 分钟 |
+| `python run.py study forecast_accuracy --part pdf` | 文档 md 转 PDF | `docs/` 的 md 和图 | md 旁边同名 `.pdf` | 否 | 几秒 |
 
 每个步骤的选项用 `python run.py <步骤> --help` 查看，各步骤的口径写在 `src/<步骤>/` 各文件开头。
-只想重现文档里的数字时，依次运行后三条即可，不需要重新清理文本和抽取。
+只想重现文档里的数字时，依次运行 measure、accuracy、study 三条即可，不需要重新清理文本和抽取。
+
+### 只跑某一个环节
+
+试跑、补抽或只重做下游某一环时用这些选项（graph、unify 的选项见 `src/graph/__init__.py`、`src/graph/unify.py` 开头）：
+
+| 命令 | 做什么 |
+|---|---|
+| `python run.py text --limit 100` | 只抽 100 篇试跑，写到 `*_sample100.parquet`，不覆盖全量结果 |
+| `python run.py graph --dry-run` | 只统计选中的研报和块数，不调用大模型 |
+| `python run.py graph --report-ids <研报ID>` | 只处理这几篇（逗号分隔），结果并入同一个输出目录，其余研报只读存档 |
+| `python run.py graph --limit 20 --output output/graph/<试跑名>` | 在选中的研报里按种子随机抽 20 篇试跑；另给 `--output`，免得改写正式结果（同 `--companies`） |
+| `python run.py graph --archived-only` | 只用已有存档重写输出，不调用大模型（不要对 `pilot` 用） |
+| `python run.py unify --dry-run` | 只统计候选组，不调用大模型 |
+| `python run.py unify --companies 600519.SH,002415.SZ` | 只统一这几家公司的研报 |
+| `python run.py measure` | 重算逻辑结构变量（3 秒，不调用大模型） |
+| `python run.py accuracy` | 重算预测准确度和控制变量（15 秒） |
+| `python run.py study forecast_accuracy --part describe,tables` | 只做列出的环节（sample、describe、decomp、regress、tables、figures、pdf），各环节只读前面环节存在输出目录里的成品 |
+| `python run.py study forecast_accuracy --part regress --blocks paired,firm_broker:paired` | 只重估这几个回归块，`reg_all.csv` 里其余行不动 |
+| `python run.py study forecast_accuracy --part pdf [--doc <md 路径>]` | 文档转 PDF，默认主文档 |
 
 ## 约定
 
@@ -76,6 +97,7 @@ output/                     各步骤的结果（不入 git）：output/<步骤>
 
 `python run.py text --limit 100` 只抽 100 篇试跑，写到 `*_sample100.parquet`，不覆盖全量结果。
 **重跑全量会改写段落表**；抽取的存档指纹包含段落文字，文字变了的研报下次抽取时会重新调用大模型。
+段落表里有一处人工替换：视源股份的研报 `5DF25733-0934-58FF-B77D-3F1464B36B8B` 第 32 段的“阿鲁纳恰尔邦”换成了“某邦”（原词会触发模型的内容过滤，整篇抽不出来）。重跑全量后要重新替换这一格，再用 `python run.py graph --report-ids` 补上这一篇。
 
 ### graph：逻辑结构抽取
 
@@ -92,14 +114,18 @@ output/                     各步骤的结果（不入 git）：output/<步骤>
 
 | 运行 | 范围 | 每块字数 | 现状 |
 |---|---|---|---|
-| `deep` | 全部公司的深度报告（首页有深度、首次覆盖、公司专题等类型标注，且正文超过 5000 字） | 5000 | 选中 975 篇，974 篇有结果、420 家公司 |
+| `deep` | 全部公司的深度报告（首页有深度、首次覆盖、公司专题等类型标注，且正文超过 5000 字） | 5000 | 选中 975 篇，全部有结果、421 家公司 |
 | `pilot` | 7 家试跑公司的全部研报（比亚迪只抽深度） | 2500 | 65 篇；试跑之后文本清理改过，按现在的代码已不能完全复现当时的选样 |
 
 ```bash
 python run.py graph --dry-run          # 只统计选中的研报和块数，不调用大模型
 python run.py graph --archived-only    # 只用已有存档重写输出，不调用大模型
+python run.py graph --report-ids <研报ID>   # 只处理这一篇（逗号分隔可以给几篇），结果并入同一个输出目录，其余研报只读存档
 python run.py graph --companies 600519.SH,002415.SZ --output output/graph/<新运行名>
 ```
+
+单独重抽或补抽某一篇用 `--report-ids`，不要用 `--companies`：后者不另给 `--output` 时会把结果表改写成只有这几家公司。
+`--report-ids` 同时换了 `--chunk-chars` 等参数时是试跑：其余研报的存档按新参数都对不上，所以只抽取这几篇、在日志里报告概念数和边数，不存档、不写输出。
 
 不要对 `pilot` 跑 `--archived-only`：它只有 56 篇的存档还有效，会把结果表改写成 56 篇。
 
@@ -119,7 +145,7 @@ python run.py graph --companies 600519.SH,002415.SZ --output output/graph/<新�
 
 ### measure：逻辑结构变量
 
-对 `graph` 的全部研报（1018 篇）各算一行，写 `output/measure/report_measures.parquet`。口径见 `src/measure/variables.py`。
+对 `graph` 的全部研报（1019 篇）各算一行，写 `output/measure/report_measures.parquet`。口径见 `src/measure/variables.py`。
 
 - 源点：没有入边的概念；严格汇点：有入边、没有出边的概念；路径：从源点到汇点的有向路径。
 - 两套变量各三个：源点数、ln(1 + 路径数)、平均路径长度。
@@ -130,19 +156,39 @@ python run.py graph --companies 600519.SH,002415.SZ --output output/graph/<新�
 
 对全部研报计算，写 `output/accuracy/` 下三张表，各列说明见 `src/accuracy/load.py`，口径见 `forecasts.py`、`peers.py`、`controls.py`。
 
-- `report_accuracy.parquet`：每篇研报一行。本篇预测（`data/EST_COMP_TN` 里 `RPT_ID` 等于 `report_id` 大写、`SEC_CD` 等于本公司的那一行）、实际值、相对同行的预测误差 PMAFE、排名分数 Score、同行数和同行时滞、六个控制变量、基础样本标记 `base`。
-- `report_peers.parquet`：FY2025 比较组的同行明细。
-- `pair_accuracy.parquet`：每个（公司，券商）一行，券商 2024 年内最后一次 FY2025 预测的 PMAFE、时效差和控制变量。
+预测误差按预测窗口定义：H1、H2、H3 是预测行的第 1、2、3 年预测（`PROFIT_T1`–`PROFIT_T3`），目标年度 = 预测行的 `RPT_YR_T` + h，逐篇不同（`RPT_YR_T` = 2022 的研报 H2 是 FY2024，= 2023 的是 FY2025）。窗口相关的列都带后缀 `_H1`、`_H2`、`_H3`；比较组是其他券商对同一公司、同一目标年度的预测。研究层的主窗口由 `src/studies/forecast_accuracy/sample.py` 的 `MAIN_H`（现为 2）决定。
+
+- `report_accuracy.parquet`：每篇研报一行。本篇预测（`data/EST_COMP_TN` 里 `RPT_ID` 等于 `report_id` 大写、`SEC_CD` 等于本公司的那一行）、各窗口的实际值、相对同行的预测误差 PMAFE、排名分数 Score、同行数和同行时滞，六个控制变量、基础样本标记 `base`。
+- `report_peers.parquet`：三个窗口的比较组同行明细（列 `h` 区分窗口）。
+- `pair_accuracy.parquet`：每个（公司，券商）一行，每个窗口 h 一组列：券商 2024 年内最后一条第 h 年预测的 PMAFE、时效差和该预测发布日上的控制变量。
 
 ### study forecast_accuracy：回归和文档的表、图
 
 样本范围是 `data/hs300_2024_dag_covered.csv` 里 241 家公司、图里有边的研报，共 791 篇；基础样本 786 篇，公司-券商层面 760 对。
-券商分组、行业、缩尾和回归设定见 `sample.py`、`regressions.py`。输出在 `output/studies/forecast_accuracy/`：
+券商分组、行业、缩尾和回归设定见 `sample.py`、`regressions.py`。
+
+被解释变量取自外部的预测误差文件 `data/forecast_errors.parquet`（读取和整理见 `errors.py`；只用公司代码与研报公司相同的行）：主变量 `PMED180_NP_H2` 是净利润口径、第 2 个预测年度的比例误差 (|A − F| − M180) / M180，M180 是文件给出的 180 天同行窗口内同行绝对误差的中位数（这一比例口径是用文件的中位数派生的，文件没有直接给出；形式上最接近自算的 PMAFE）；主变量的定义名只在 `sample.py` 的 `MAIN_DEF` 一处定义。其余定义（75 天窗口、相对误差 `relative_fe`、相对一致预期的增量误差、原始误差）× 净利润 / EPS 两种口径 × 三个窗口共 54 列，用于稳健性。`accuracy` 步骤自算的 PMAFE、Score 留在样本里作对照（`own_measures` 块），同行时滞仍用自算 90 天比较组的 `PEERLAG_Hh`（数据文件没有同行预测的时间）。公司-券商层面的被解释变量是被评价预测所在研报在数据文件里算出的同一主变量。
+
+分成几个环节，用 `--part` 选（逗号分隔，按下表顺序执行；不给时做前六个，`pdf` 要显式指定）。每个环节只读前面环节存在输出目录里的成品，缺了会报错并提示先跑哪个环节；csv 读回时数值逐位不变，所以分开跑和一次跑完结果相同。
+
+| 环节 | 做什么 | 写（`output/studies/forecast_accuracy/` 内，除注明外） |
+|---|---|---|
+| `sample` | 选样本、并入数据文件的预测误差、缩尾，图 2 的同行明细 | `scope.parquet`（791 篇研究范围）、`sample_report.parquet`、`sample_pair.parquet`、`forecast_errors_rows.parquet`（数据文件里用到的行）、`figure2_*.parquet` |
+| `describe` | 预测误差变量和逻辑结构变量的描述性统计（表 1、表 3），与自算 PMAFE 的一致性（表 2）和中位数核对 | `error_stats.csv`、`descriptive_stats.csv`、`tables/table1_error_descriptive.csv`、`tables/consistency.csv`、`tables/consistency_fields.csv`、`tables/table3_descriptive.csv` |
+| `decomp` | 固定效应分解（表 4） | `variance_decomposition.csv`、`tables/table4_fe_decomposition.csv` |
+| `regress` | 全部回归；`--blocks` 只重估其中几块 | `reg_all.csv` |
+| `tables` | 回归表（表 5–13）和正文数字 | `tables/table5_….csv` 到 `table13_….csv`、`tables/text_numbers.csv` |
+| `figures` | 图 1、图 2 | `docs/figures/`（`--fig-dir` 可改） |
+| `pdf` | 文档 md 转 PDF（`src/mdpdf.py`，不联网；公式转成 MathML 由浏览器排版） | 中间文件 `<md 文件名>.html`；md 旁边同名 `.pdf` |
+
+`--log1p` 把六个逻辑结构变量都取 ln(1 + x)，只在 `sample` 环节改变变换，输出默认在 `output/studies/forecast_accuracy_log1p/`，单独跑其他环节时也要带上 `--log1p`（或同一个 `--output`）。
+
+主要输出：
 
 - `sample_report.parquet`、`sample_pair.parquet`：两个层面的回归样本。
 - `reg_all.csv`：全部回归系数的长表。
-- `tables/table1_….csv` 到 `table8_….csv`：文档的表 1–8；`tables/text_numbers.csv`：正文、图注和第 4 节出现的每个数字及其算法。
-- `docs/figures/` 下的两张图。
+- `tables/` 下：文档的表 1–13（表 2 是 `consistency.csv` 的 H2 各行，字段层面的一致性和中位数核对在 `consistency_fields.csv`）；`tables/text_numbers.csv`：正文、图注和第 4 节出现的每个数字及其算法。
+- `docs/figures/` 下的两张图；`docs/研报逻辑结构与分析师预测准确度.pdf`。
 
 文档的每张表、每张图、每一节对应哪个输出文件、由哪个函数生成，列在 `src/studies/forecast_accuracy/__init__.py` 开头。
 
@@ -153,7 +199,8 @@ python run.py graph --companies 600519.SH,002415.SZ --output output/graph/<新�
 | 路径 | 内容 | 谁用 |
 |---|---|---|
 | `HS300_reports_2024/` | 研报纯文本，`MM/DD/<GUID>.txt` | text、graph |
-| `EST_COMP_TN/<年>/<年>-<月>.parquet` | 分析师盈利预测 | accuracy |
+| `EST_COMP_TN/<年>/<年>-<月>.parquet` | 分析师盈利预测 | accuracy；study（中位数核对） |
+| `forecast_errors.parquet` | 外部提供的预测误差（每篇研报 3 个预测年度 × 净利润 / EPS；同行窗口的具体取法文件未附说明） | study（被解释变量） |
 | `market_data/daily_stock_data.parquet` | 个股日行情 | accuracy |
 | `market_data/financial_data.parquet` | 财务数据（年报实际值、公告日） | accuracy |
 | `market_data/industry.xlsx` | 行业分类（申万一级） | study |

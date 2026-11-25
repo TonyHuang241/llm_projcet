@@ -9,12 +9,15 @@
   本篇预测    RPT_ID 转大写后等于 report_id 转大写、SEC_CD 等于研报公司代码的那一行（只在 OWN_YEARS 各年文件里找）；
               同一（RPT_ID，公司）有多条时按 RPT_DT、CREAT_TM、SEQ 稳定排序取最后一条（现有数据里没有这种重复，排序只为结果不依赖
               文件顺序）。匹配到的行给出 ORG_CL（券商编号）和 RPT_YR_T（记为 T）。
-              FY2024、FY2025 的预测：T = 2023 时分别是 PROFIT_T1、PROFIT_T2，T = 2022 时是 PROFIT_T2、PROFIT_T3，其余缺失。
+  预测窗口    H1、H2、H3（h = 1、2、3）：本篇预测行的 PROFIT_Th 是对 T + h 年的预测，目标年度 TY_Hh = T + h 逐篇不同
+              （T = 2022 的研报 H1、H2、H3 = FY2023、FY2024、FY2025；T = 2023 的是 FY2024、FY2025、FY2026）。
+              F_Hh = PROFIT_Th，A_Hh = 该公司 TY_Hh 财年的实际值（没有就缺失），ABSERR_Hh = |F_Hh − A_Hh|。
   实际值      financial_data 里 report_date = <财年>1231 的 np_parent_company_owners_ttm（归母净利润），公告日 = date；
               同一（公司，report_date）有多行时取最后一行。另取总资产 TA、净资产 EQ = 总资产 − 总负债（控制变量用）。
-  基础样本    base = 匹配到本篇预测 & 有 T+1 年的预测值（PROFIT_T1）和实际值 & 研报日早于 T+1 年年报的公告日（字符串比较）。
+  基础样本    base = 匹配到本篇预测 & 有 H1（T+1 年）的预测值 F_H1 和实际值 A_H1 & 研报日早于 T+1 年年报的公告日（字符串比较）。
               逐篇可判定，与研报范围无关。
-  预测期      LNHORIZON24 / 25 = ln(FY2024 / FY2025 年报公告日 − 研报日 的天数)，天数 ≤ 0 时缺失（研究层 src/studies/forecast_accuracy/regressions.py 的 y_sample 选样本时要这两列）。
+  预测期      LNHORIZON_Hh = ln(TY_Hh 年报公告日 − 研报日 的天数)，天数 ≤ 0 或公告日缺失时缺失
+              （研究层 src/studies/forecast_accuracy/regressions.py 的 y_sample 按 Y 的窗口取这一列）。
 """
 import glob
 
@@ -28,6 +31,7 @@ OWN_YEARS = range(2018, 2025)  # 匹配本篇预测时读这些年份的文件
 LONG_YEARS = range(2018, 2026)  # 预测长表（比较组）读这些年份的文件
 EST_COLS = ['SEQ', 'CREAT_TM', 'RPT_ID', 'SEC_CD', 'ORG_CL', 'RPT_DT', 'RPT_YR_T', 'PROFIT_T1', 'PROFIT_T2', 'PROFIT_T3']
 LONG_KEYS = ['SEC_CD', 'ty', 'ORG_CL', 'RPT_DT', 'CREAT_TM', 'SEQ']
+HORIZONS = (1, 2, 3)  # 预测窗口 H1、H2、H3：第 h 年预测 PROFIT_Th，目标年度 = RPT_YR_T + h
 
 
 def load_est(codes, years=LONG_YEARS, est_dir=EST_DIR):
@@ -76,24 +80,22 @@ def match_own(reports, est):
 
 
 def report_forecasts(reports, est, ann):
-    """每篇研报一行：本篇预测（match_own）、FY2024 / FY2025 的预测 F、实际值 A、绝对误差 ABSERR、基础样本 base、预测期，
-    以及控制变量要用的 T 年总资产 TA_T、净资产 EQ_T、归母净利润 AT。行序同 reports。"""
+    """每篇研报一行：本篇预测（match_own）、各窗口 h 的目标年度 TY_Hh、预测 F_Hh、实际值 A_Hh、年报公告日 ANN_Hh、绝对误差
+    ABSERR_Hh、预测期 LNHORIZON_Hh，基础样本 base，以及控制变量要用的 T 年总资产 TA_T、净资产 EQ_T。行序同 reports。"""
     d = match_own(reports, est)
     d['T'] = d.RPT_YR_T.astype('Int64')
     lut = {c: ann[c].to_dict() for c in ann.columns}
     get = lambda col, fy: [lut[col].get((c, int(y)), np.nan) if pd.notna(y) else np.nan for c, y in zip(d.code, fy)]  # noqa: E731
-    d['TY1'], d['TY24'], d['TY25'] = d['T'] + 1, 2024, 2025
-    d['F1'] = d.PROFIT_T1
-    d['F24'] = np.where(d.RPT_YR_T == 2023, d.PROFIT_T1, np.where(d.RPT_YR_T == 2022, d.PROFIT_T2, np.nan))
-    d['F25'] = np.where(d.RPT_YR_T == 2023, d.PROFIT_T2, np.where(d.RPT_YR_T == 2022, d.PROFIT_T3, np.nan))
-    for tag, fy in (('1', d.TY1), ('24', d.TY24), ('25', d.TY25), ('T', d['T'])):
-        d[f'A{tag}'], d[f'ANN{tag}'] = get('A', fy), get('ANN', fy)
-    d['TA_T'], d['EQ_T'] = get('TA', d['T']), get('EQ', d['T'])
-    has_act1 = d.matched & d.F1.notna() & d.A1.notna()
-    d['base'] = has_act1 & (d.ANN1.fillna('') > d.date)
-    d['ABSERR24'], d['ABSERR25'] = (d.F24 - d.A24).abs(), (d.F25 - d.A25).abs()
     days = lambda a: (pd.to_datetime(a, format='%Y%m%d', errors='coerce') - pd.to_datetime(d.date, format='%Y%m%d')).dt.days  # noqa: E731
-    for tag in ('24', '25'):
-        h = days(d[f'ANN{tag}'])
-        d[f'LNHORIZON{tag}'] = np.log(h.where(h > 0))
+    for h in HORIZONS:
+        ty = d['T'] + h
+        d[f'TY_H{h}'] = ty
+        d[f'F_H{h}'] = d[f'PROFIT_T{h}']
+        d[f'A_H{h}'], d[f'ANN_H{h}'] = get('A', ty), get('ANN', ty)
+        d[f'ABSERR_H{h}'] = (d[f'F_H{h}'] - d[f'A_H{h}']).abs()
+        n = days(d[f'ANN_H{h}'])
+        d[f'LNHORIZON_H{h}'] = np.log(n.where(n > 0))
+    d['TA_T'], d['EQ_T'] = get('TA', d['T']), get('EQ', d['T'])
+    has_act1 = d.matched & d.F_H1.notna() & d.A_H1.notna()
+    d['base'] = has_act1 & (d.ANN_H1.fillna('') > d.date)
     return d

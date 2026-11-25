@@ -1,9 +1,11 @@
 """步骤 accuracy：分析师盈利预测准确度和控制变量（变量层，只出原始值）。
 
 研报范围 = graph 步骤能读到的全部研报（src/graph/load.py，deep 和 pilot 两次运行合并，同一篇取 deep 的），公司代码 = 研报表
-stock_code 的前 6 位，发布日 = 研报表的 date。对每篇研报匹配它本身在 data/EST_COMP_TN 里的预测行，算 FY2024 / FY2025 的绝对预测误差、
-相对同行的预测误差 PMAFE、排名分数 Score、同行时滞 PeerLag 和六个控制变量；另对研报出现过的每个（公司，券商）算券商 2024 年内最后
-一次 FY2025 预测的 PMAFE、时效差 DAGE 和该预测发布日上的控制变量。口径见 forecasts.py、peers.py、controls.py 的模块说明。
+stock_code 的前 6 位，发布日 = 研报表的 date。对每篇研报匹配它本身在 data/EST_COMP_TN 里的预测行（RPT_YR_T 记为 T），按预测窗口
+H1、H2、H3（第 h 年预测 PROFIT_Th，目标年度 T + h，逐篇不同）分别算绝对预测误差、相对同行的预测误差 PMAFE、排名分数 Score、
+同行时滞 PeerLag，另算六个控制变量；对研报出现过的每个（公司，券商）按窗口 h 算券商 2024 年内最后一条第 h 年预测的 PMAFE、
+时效差 DAGE 和该预测发布日上的控制变量。口径见 forecasts.py、peers.py、controls.py 的模块说明。窗口相关的列都带后缀 _Hh，
+主窗口由研究层选（src/studies/forecast_accuracy/sample.py 的 MAIN_H），这里三个窗口都给出。
 
 这里不做任何依赖样本的处理：不缩尾、不标准化、不选回归样本，也不给券商分组、不配行业（这些在研究层 src/studies/ 里做）；
 基础样本标记 base 逐篇可判定，作为一列给出。
@@ -26,6 +28,7 @@ def build():
     import pandas as pd
 
     from src.accuracy import controls, forecasts, peers
+    from src.accuracy.forecasts import HORIZONS
     from src.graph.load import read_table
 
     r = read_table('reports', columns=['stock_code', 'date', 'broker'])
@@ -42,23 +45,35 @@ def build():
     ctl = controls.controls_at(d.assign(key=d.report_id)[['key', 'code', 'date', 'T']], ann).rename(columns={'key': 'report_id'})
     R = (rep.merge(d.drop(columns=['code', 'date']), on='report_id', how='left', validate='1:1')
          .merge(pm, on='report_id', how='left', validate='1:1').merge(ctl, on='report_id', how='left', validate='1:1'))
-    R = R[REPORT_COLS]
+    report_cols, pair_cols = columns()
+    R = R[report_cols]
 
     P = peers.pair_table(R[['report_id', 'code', 'ORG_CL', 'date']], lg, ann)
-    P['key'] = [f'{c}|{o}' for c, o in zip(P.code, P.ORG_CL)]
-    ev = P[['key', 'code', 'EVAL_DT25', 'EVAL_T25']].dropna().rename(columns={'EVAL_DT25': 'date', 'EVAL_T25': 'T'})
-    P = P.merge(controls.controls_at(ev, ann), on='key', how='left', validate='1:1').drop(columns='key')
-    return R, detail, P[PAIR_COLS]
+    ev = pd.concat([P[['code', 'ORG_CL', f'EVAL_DT_H{h}', f'EVAL_T_H{h}']].dropna()
+                    .rename(columns={f'EVAL_DT_H{h}': 'date', f'EVAL_T_H{h}': 'T'}).assign(h=h) for h in HORIZONS], ignore_index=True)
+    ev['key'] = [f'{c}|{o}|{h}' for c, o, h in zip(ev.code, ev.ORG_CL, ev.h)]
+    ctl = controls.controls_at(ev[['key', 'code', 'date', 'T']], ann)  # 三个窗口的被评价预测一起算（日行情只读一次）
+    ctl = ev[['code', 'ORG_CL', 'h', 'key']].merge(ctl, on='key', validate='1:1')
+    for h in HORIZONS:
+        c = ctl[ctl.h == h].drop(columns=['h', 'key']).rename(columns={v: f'{v}_H{h}' for v in controls.CTRL})
+        P = P.merge(c, on=['code', 'ORG_CL'], how='left', validate='1:1')
+    return R, detail, P[pair_cols]
 
 
-REPORT_COLS = ['report_id', 'code', 'date', 'broker', 'ORG_CL', 'RPT_YR_T', 'matched', 'base', 'TY24', 'TY25', 'LNHORIZON24', 'LNHORIZON25',
-               'F24', 'A24', 'ABSERR24', 'F25', 'A25', 'ABSERR25',
-               'PMAFE_FY25', 'PMAFE_FY24', 'SCORE_FY25', 'PMAFEW30_FY25',
-               'N_PEERS25', 'N_PEERS24', 'N_PEERSW30', 'PEERLAG25', 'PEERLAG24', 'PEERLAGW30', 'LAGMED25', 'LNNPEERS25',
-               'SIZE_M', 'BM', 'MOM', 'VOL', 'ROA_T', 'LNAGE']
-PAIR_COLS = ['code', 'ORG_CL', 'n_reports', 'last_deep_dt', 'EVAL_RPT_ID25', 'EVAL_DT25', 'EVAL_F25', 'EVAL_T25', 'A25', 'AFE25',
-             'N_GROUP25', 'AGE25', 'MAFE25', 'PMAFE_FY25', 'DAGE25', 'EVAL_IS_DEEP', 'EVAL_GAP',
-             'SIZE_M', 'BM', 'MOM', 'VOL', 'ROA_T', 'LNAGE']
+def columns():
+    """(report_accuracy 的列, pair_accuracy 的列)；窗口相关的列按 h = 1、2、3 依次排。"""
+    from src.accuracy.controls import CTRL
+    from src.accuracy.forecasts import HORIZONS
+    rep = (['report_id', 'code', 'date', 'broker', 'ORG_CL', 'RPT_YR_T', 'matched', 'base']
+           + [f'{v}_H{h}' for h in HORIZONS for v in ('TY', 'LNHORIZON', 'F', 'A', 'ABSERR')]
+           + [f'{v}_H{h}' for h in HORIZONS for v in ('PMAFE', 'SCORE', 'N_PEERS', 'PEERLAG', 'LAGMED', 'LNNPEERS',
+                                                       'PMAFEW30', 'N_PEERSW30', 'PEERLAGW30')]
+           + CTRL)
+    pair = (['code', 'ORG_CL', 'n_reports', 'last_deep_dt']
+            + [f'{v}_H{h}' for h in HORIZONS for v in ['EVAL_RPT_ID', 'EVAL_DT', 'EVAL_F', 'EVAL_T', 'TY', 'A', 'AFE', 'N_GROUP', 'AGE',
+                                                       'MAFE', 'PMAFE', 'DAGE', 'EVAL_LAST_TY', 'EVAL_IS_DEEP', 'EVAL_GAP'] + CTRL])
+    return rep, pair
+
 
 
 def add_args(ap):
@@ -69,6 +84,8 @@ def add_args(ap):
 def run(args):
     import time
     from pathlib import Path
+
+    from src.accuracy.forecasts import HORIZONS
     t0 = time.perf_counter()
     out = Path(args.output) if args.output else out_dir(STEP)
     out.mkdir(parents=True, exist_ok=True)
@@ -77,6 +94,10 @@ def run(args):
         t.to_parquet(out / FILES[key], index=False)
         print(f'{FILES[key]}：{len(t)} 行、{t.shape[1]} 列')
     R, _, P = tables
-    print(f'研报 {len(R)} 篇：匹配到本篇预测 {int(R.matched.sum())} 篇，基础样本 {int(R.base.sum())} 篇，PMAFE_FY25 非缺失 '
-          f'{int(R.PMAFE_FY25.notna().sum())} 篇；公司-券商对 {len(P)} 个，PMAFE_FY25 非缺失 {int(P.PMAFE_FY25.notna().sum())} 个')
+    print(f'研报 {len(R)} 篇：匹配到本篇预测 {int(R.matched.sum())} 篇，基础样本 {int(R.base.sum())} 篇；公司-券商对 {len(P)} 个')
+    for h in HORIZONS:
+        ev = P[f'EVAL_LAST_TY_H{h}'].dropna()
+        print(f'  H{h}：研报 PMAFE_H{h} 非缺失 {int(R[f"PMAFE_H{h}"].notna().sum())} 篇；公司-券商对 PMAFE_H{h} 非缺失 '
+              f'{int(P[f"PMAFE_H{h}"].notna().sum())} 个，有被评价预测 {len(ev)} 个，其中被评价预测不是本券商当年对目标年度的'
+              f'最后一条 {int((~ev.astype(bool)).sum())} 个')
     print(f'输出在 {out}，耗时 {time.perf_counter() - t0:.1f} 秒')
