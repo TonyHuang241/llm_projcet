@@ -37,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import networkx as nx
+import pyarrow.parquet as pq
 
 from src.graph.common import (VIEWER_TEMPLATE, DagOut, fill, merge_direction, name_key, norm_direction, norm_name,  # noqa: F401
                               para_block, quote_in, squash, too_many, write_js, write_parquet)
@@ -471,17 +472,27 @@ def clear_results(out):
         path.unlink(missing_ok=True)
 
 
+def output_report_ids(out):
+    """输出目录的研报表里现有哪些研报。"""
+    path = out.data / 'reports.parquet'
+    return set(pq.read_table(path, columns=['report_id'])['report_id'].to_pylist()) if path.exists() else set()
+
+
 def main(paras_path, out_dir, reports_path=None, select=None, limit=None, seed=0, workers=50, chunk_chars=CHUNK_CHARS,
-         min_per_quarter=1, fresh=False, dry_run=False, keep=None, archived_only=False):
+         min_per_quarter=1, fresh=False, dry_run=False, keep=None, archived_only=False, only=None):
     """paras_path：python run.py text 写出的段落 parquet；reports_path：配套的研报元数据表，select(行) 为真的研报才抽取
     （None 时不筛选）；limit、seed：在选中的研报里按种子随机抽多少篇（同 src/text/load.py 的 load_reports）；
     workers：同时在途的大模型调用数，也是同时在处理的研报篇数；chunk_chars：合并段落时每块的字数上限；
     min_per_quarter：同一家公司同一个季度不足这么多篇的不抽（1 表示不按这条筛）；fresh：先清空上一次的结果和存档；
     dry_run：只统计选中的研报和合并后的块数，不调用大模型；keep(研报)：读入正文后再筛一遍，为真的才抽（如按正文字数），
     在按 limit 抽样之前筛；archived_only：只用已有的存档写输出、不调用大模型，没有有效存档的研报这次不进输出
-    （少数研报的调用一直卡住时用，下次正常运行再补）。"""
+    （少数研报的调用一直卡住时用，下次正常运行再补）；only：研报 ID 的列表，只处理选中的研报里的这几篇，其余研报只读存档，
+    结果照常并入同一个输出目录。这时如果换了每块字数等参数，现有结果里其余研报的存档会全部对不上、写输出会把它们去掉，
+    就改成试跑：只抽取这几篇、在日志里报告，不存档、不写输出。"""
     t0 = time.time()
     out = DagOut(out_dir)
+    if only and fresh:
+        raise SystemExit('--fresh 会清空这次运行的全部结果和存档，不能和 --report-ids 一起用')
     info, note = select_reports(reports_path, select, min_per_quarter)
     reports, _ = load_reports(paras_path, None if keep else limit, info, seed)
     if keep:
@@ -493,16 +504,24 @@ def main(paras_path, out_dir, reports_path=None, select=None, limit=None, seed=0
             reports = [r for r in reports if r.rid in ids]
     if not reports:
         raise SystemExit(f'{note}；没有可抽取的研报')
+    if only:
+        by_upper = {r.rid.upper(): r.rid for r in reports}
+        unknown = [x for x in only if x.upper() not in by_upper]
+        if unknown:
+            raise SystemExit(f'{note}；--report-ids 里这些研报不在其中（ID 写错了，或这次运行的选样没有选中它）：{"、".join(unknown)}')
+        only = {by_upper[x.upper()] for x in only}
+        note += f'；--report-ids：只处理其中 {len(only)} 篇，其余研报只读存档'
+    targets = [r for r in reports if not only or r.rid in only]  # 这次要处理的研报（统计和日志按它算）
     for r in reports:
         r.chunks = make_chunks(r.paras, chunk_chars)
-    n_paras, n_chunks = sum(len(r.paras) for r in reports), sum(len(r.chunks) for r in reports)
-    summary = (f'{len(reports)} 篇研报、{len({r.meta["stock_code"] for r in reports})} 家公司；{n_paras} 个段落合并成 '
+    n_paras, n_chunks = sum(len(r.paras) for r in targets), sum(len(r.chunks) for r in targets)
+    summary = (f'{len(targets)} 篇研报、{len({r.meta["stock_code"] for r in targets})} 家公司；{n_paras} 个段落合并成 '
                f'{n_chunks} 块（每块不超过 {chunk_chars} 字），每块抽概念、连边各一次调用')
     if dry_run:
         print(note)
         print(summary)
         by_c = defaultdict(lambda: [0, 0, 0])
-        for r in reports:
+        for r in targets:
             x = by_c[(r.meta['stock_code'], r.meta['company'])]
             x[0], x[1], x[2] = x[0] + 1, x[1] + len(r.paras), x[2] + len(r.chunks)
         for (code, name), (n, p, c) in sorted(by_c.items(), key=lambda kv: kv[1][0]):
@@ -522,6 +541,15 @@ def main(paras_path, out_dir, reports_path=None, select=None, limit=None, seed=0
     sigs = {r.rid: archive_sig(r, base) for r in reports}
     done = {r.rid: r for r in reports if read_archive(out, r, sigs[r.rid])}
     todo = sorted((r for r in reports if r.rid not in done), key=lambda r: (-len(r.chunks), -len(r.paras), r.rid))
+    trial = False
+    if only:
+        todo = [r for r in todo if r.rid in only]
+        have = output_report_ids(out)
+        lost = [r for r in reports if r.rid in have and r.rid not in done and r.rid not in only]
+        if lost:
+            trial = True
+            log(f'试跑：现有结果里另有 {len(lost)} 篇的存档按这次的参数对不上（每块字数、提示词或段落文字变了），写输出会把它们去掉；'
+                '这次只抽取这几篇、在日志里报告，不存档、不写输出')
     log(f'从存档读回 {len(done)} 篇，本次待处理 {len(todo)} 篇、{sum(len(r.chunks) for r in todo)} 块（长研报先开始）')
     if archived_only and todo:
         log(f'只用存档：{len(todo)} 篇没有有效存档，这次不抽、不进输出：' + '、'.join(f'{r.meta["company"]} {r.rid[:8]}' for r in todo))
@@ -545,7 +573,8 @@ def main(paras_path, out_dir, reports_path=None, select=None, limit=None, seed=0
                 append_jsonl(out.failed, {'report_id': r.rid, 'error': err, 'time': time.strftime('%Y-%m-%d %H:%M:%S')})
                 log(f'!!! {r.rid} 出错，不存档、不进输出（下次运行重试）：{err[:300]}')
                 continue
-            write_archive(out, r, sigs[r.rid])
+            if not trial:
+                write_archive(out, r, sigs[r.rid])
             done[r.rid] = r
             s, u = r.stats, ctx.llm.usage
             log(f'已做完 {k}/{len(todo)} 篇：{r.meta["company"]} {r.meta["date"]} {r.meta["broker"]}，{len(r.paras)} 段 {s["n_chunks"]} 块；'
@@ -558,6 +587,10 @@ def main(paras_path, out_dir, reports_path=None, select=None, limit=None, seed=0
     if fatal is not None:
         log(f'!!! 致命错误，已停止：{fatal}。已做完的研报都已存档，处理后重新运行即接着跑')
         raise SystemExit(1)
+    if trial:
+        log(f'===== 试跑结束：做完 {len(todo) - len(failed)} 篇、出错 {len(failed)} 篇，各篇的概念数和边数见上面；'
+            f'没有存档，{out.data} 没有改动；用时 {time.time() - t0:.0f} 秒 =====')
+        return
     finished = [done[r.rid] for r in reports if r.rid in done]
     if not finished:
         raise SystemExit('没有完成的研报，见上面的日志')

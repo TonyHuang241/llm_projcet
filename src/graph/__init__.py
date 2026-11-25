@@ -11,6 +11,8 @@
     python run.py graph --dry-run                    只统计选中的研报、段落合并后的块数，不调用大模型（默认 --run deep）
     python run.py graph --run pilot                  按试跑那次的配置抽取（7 家公司）
     python run.py graph --companies 600519.SH,002415.SZ   只抽这几只股票的研报；--companies all 不限公司
+    python run.py graph --report-ids <研报ID>         只处理这一篇（逗号分隔可以给几篇），结果并入同一个输出目录，其余研报只读存档；
+                                                     同时换了 --chunk-chars 等参数时是试跑：只在日志里报告，不存档、不写输出
     python run.py graph --deep-only 002594.SZ        这几只股票只抽深度报告；--deep-only all 全部只抽深度报告，none 不限
     python run.py graph --min-deep-chars 3000        深度报告正文超过 3000 字就抽
     python run.py graph --limit 20                   在选中的研报里随机抽 20 篇试跑（种子固定，同一个种子下嵌套）
@@ -36,7 +38,8 @@ from src.config import PARAGRAPHS, TXT_DIR, out_dir
 RUNS = {
     # 全样本深度报告（重构前在概念 DAG 输出目录的 deep/ 子目录下）：当时用重构前的抽取入口脚本跑的，参数是
     #   --companies all --deep-only all --chunk-chars 5000 --workers 100 --output <deep 子目录>
-    # 选中 975 篇、3200 块，974 篇有存档（视源股份 1 篇的一块回复始终不是合法 JSON，跳过，见 data/skipped_reports.csv）；
+    # 选中 975 篇、3200 块，全部有存档（视源股份 1 篇当时因内容过滤没抽出来，2026-11-24 替换段落表里的一个词后补上，
+    # 见 data/skipped_reports.csv 和 README 的 text 一节）；
     # 名称统一用的是 --companies all --workers 100
     'deep': dict(companies=[], deep_only=['ALL'], min_deep_chars=5000, chunk_chars=5000, workers=100, limit=None, seed=0,
                  min_per_quarter=1, unify_companies=[]),
@@ -92,6 +95,9 @@ def add_args(ap):
     ap.add_argument('--all', action='store_true', help='不按元数据表筛选，段落表里的研报全部抽取')
     ap.add_argument('--output', default=None, help='输出目录；不给时用 output/graph/<运行名>/')
     ap.add_argument('--companies', default=None, help='只抽这些股票代码的研报，逗号分隔；all 表示不限公司；不给时用运行配置')
+    ap.add_argument('--report-ids', default=None,
+                    help='只处理这几篇研报（report_id，逗号分隔，要在这次运行选中的研报里），其余研报只读存档，结果并入同一个输出目录；'
+                         '同时换了每块字数等参数、会让其余研报的存档对不上时改成试跑，不存档、不写输出')
     ap.add_argument('--deep-only', default=None, help='这些股票代码只抽深度报告，逗号分隔；all 表示所有股票，none 表示不限；不给时用运行配置')
     ap.add_argument('--min-deep-chars', type=int, default=None, help='深度报告正文要超过多少字才抽（只管只抽深度报告的股票）；不给时用运行配置')
     ap.add_argument('--limit', type=int, default=None, help='在选中的研报里按种子随机抽多少篇试跑；不给时用运行配置')
@@ -119,4 +125,5 @@ def run(args):
                  reports_path=None if args.all else args.reports or reports_table_path(args.input), select=select,
                  limit=cfg['limit'], seed=cfg['seed'], workers=cfg['workers'], chunk_chars=cfg['chunk_chars'],
                  min_per_quarter=cfg['min_per_quarter'], fresh=args.fresh, dry_run=args.dry_run, keep=keep,
-                 archived_only=args.archived_only)
+                 archived_only=args.archived_only,
+                 only=[x.strip() for x in args.report_ids.split(',') if x.strip()] if args.report_ids else None)
