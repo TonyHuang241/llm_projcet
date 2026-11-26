@@ -36,6 +36,10 @@ from src.config import ROOT_DIR
 
 ROOT = ROOT_DIR  # 仓库根目录，.env 放在这里
 RETRYABLE_HTTP = {429, 500, 502, 503, 504, 520, 521, 522, 523, 524}  # 52x：Cloudflare 网关与源站之间的临时错误
+# HTTP 400 里也按可重试处理的错误（匹配响应体）：中转站转述的上游错误“请求参数有误”。同一个请求原样重发总是同样的
+# 结果，但重发时请求开头会加一行序号（见 LLMClient.chat 的 payload）、换到别的上游就能过（2026-11-25：hs300_full 里
+# 4 篇研报每次都回 400，改成可重试后第 2 次请求全部成功）
+RETRYABLE_400 = ('upstream_error',)
 # 以下错误码按智谱设置，换模型时按需补充（匹配错误响应体中的文本）
 CONTENT_FILTER_CODES = ('"1301"',)  # 内容安全拦截：由调用方决定重试、拆半或保留原句
 # 余额不足/无可用资源包（智谱 1113；new-api 类中转站 insufficient_user_quota；laneai insufficient_balance）：
@@ -211,7 +215,7 @@ class LLMClient:
                 if e.code in (401, 402, 403) or any(c in body for c in FATAL_CODES):
                     STOP.set()
                     raise FatalAPIError(f'HTTP {e.code}: {body}') from None
-                if e.code not in RETRYABLE_HTTP:
+                if e.code not in RETRYABLE_HTTP and not (e.code == 400 and any(c in body for c in RETRYABLE_400)):
                     if any(c in body for c in CONTENT_FILTER_CODES):
                         raise ContentFilterError('内容安全过滤') from None
                     raise RuntimeError(f'HTTP {e.code}: {body}') from None
