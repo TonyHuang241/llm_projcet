@@ -2,8 +2,16 @@
 
 样本和版本：--sample（默认 hs300_deep）决定研究哪些研报，--version（默认样本的主版本，hs300_deep 是 v1）决定逻辑结构取自
 哪个抽取版本的库（给的不是主版本时样本的全部研报都从那个版本取，见 src/samples 的 assignment）。输出目录
-output/studies/forecast_accuracy/<样本>_<版本>/（--log1p 时目录名再加 _log1p），文档 md、PDF 和 figures/ 也在里面（入 git）；
-每次跑 sample 环节都写一份 manifest.json（样本、版本、是否 log1p、篇数、各版本篇数、生成时间）。
+output/studies/forecast_accuracy/<样本>_<版本>/（--rating-only 时目录名加 _rating，--log1p 时再加 _log1p，两个都给时是
+<样本>_<版本>_rating_log1p），文档 md、PDF 和 figures/ 也在里面（入 git）；
+每次跑 sample 环节都写一份 manifest.json（样本、版本、是否 log1p、篇数、各版本篇数、生成时间；给了 --rating-only 时另记
+rating_only: true，不给时不写这一项，manifest 与加这个开关之前相同）。
+
+范围开关 --rating-only：研究范围（sample.scope）在原有规则（样本里 n_edges > 0、样本登记了公司名单时限定在名单内）之后，
+再限定在“投资评级”是严格汇点（入度 > 0、出度 = 0；measure 的 RATING_STRICT_SINK 为真）的研报，所以 RT_* 三个变量在范围内全部
+有定义。之后的基础样本、券商分组、缩尾、标准化、公司-券商层面的样本对都在这个范围内照原规则做，口径不另改。和 --log1p 一样，
+它在 sample 环节决定范围，其他环节读同一个输出目录：单独跑某个环节时也要带上 --rating-only（或同一个 --output）。
+不给时行为与加这个开关之前完全相同。
 
 输入：上游步骤的成品（先跑 python run.py measure --version <版本>、python run.py accuracy --sample <样本>）src.graph.load、
 src.measure.load、src.accuracy.load，样本登记的公司名单（hs300_deep 是 data/hs300_2024_dag_covered.csv）、data/market_data/industry.xlsx，以及外部的预测误差文件 data/forecast_errors.parquet（被解释变量，
@@ -44,8 +52,11 @@ regressions.read_reg），所以分环节运行和一次跑完的结果完全相
                                                                     output/studies/forecast_accuracy/hs300_deep_v1_log1p/；--log1p
                                                                     只在 sample 环节改变变换，其他环节读这个目录（单独跑其他环节时也要带上）
     python run.py study forecast_accuracy --sample hs300_full       另一个样本，输出在 hs300_full_v1/
+    python run.py study forecast_accuracy --sample hs300_full --rating-only
+                                                                    只研究“投资评级”是严格汇点的研报，输出在 hs300_full_v1_rating/
+                                                                    （共约 8 分钟，回归约 5 分钟）；单独跑其他环节时也要带上 --rating-only
 
-输出在 output/studies/forecast_accuracy/<样本>_<版本>[_log1p]/（下面的篇数是 hs300_deep_v1 的）：
+输出在 output/studies/forecast_accuracy/<样本>_<版本>[_rating][_log1p]/（下面的篇数是 hs300_deep_v1 的）：
     scope.parquet                研究范围 791 篇（合并了 accuracy 的全部列和 measure 的原始值）           sample.scope
     sample_report.parquet        研报层面回归样本（786 篇基础样本；<变量>_RAW 为缩尾前的值）             sample.report_sample
     sample_pair.parquet          公司-券商层面回归样本（760 对）                                         sample.pair_sample
@@ -62,7 +73,8 @@ regressions.read_reg），所以分环节运行和一次跑完的结果完全相
     figures/                     图 1、图 2（文档 md 用相对路径 figures/ 引用）                          figures.schematic、peer_lag_plot
     研报逻辑结构与分析师预测准确度.md、.pdf   文档和 PDF（对数变量版的目录里是 …_对数变量.md）           人工撰写；src.mdpdf
     <md 文件名>.html             pdf 环节的中间 HTML                                                     src.mdpdf
-    manifest.json                这份输出用的样本、版本、是否 log1p、篇数、各版本篇数、生成时间           stage_sample
+    manifest.json                这份输出用的样本、版本、是否 log1p（--rating-only 时另记 rating_only）、  stage_sample
+                                 篇数、各版本篇数、生成时间
 
 文档的表 / 图 / 节 -> 输出文件 -> 生成它的函数
     1.1、1.2 节样本数字          tables/text_numbers.csv（位置 1.1、1.2）    sample.scope、tables.text_numbers
@@ -112,16 +124,20 @@ def add_args(ap):
     ap.add_argument('--version', default=None,
                     help='逻辑结构取自哪个抽取版本；默认样本的主版本（照清单，个别研报可以取自别的版本），给别的版本时样本的全部研报都取自它')
     ap.add_argument('--output', default=None,
-                    help='输出目录，默认 output/studies/forecast_accuracy/<样本>_<版本>/（--log1p 时再加 _log1p）')
+                    help='输出目录，默认 output/studies/forecast_accuracy/<样本>_<版本>/（--rating-only 时加 _rating，--log1p 时再加 _log1p）')
     ap.add_argument('--log1p', action='store_true', help='六个逻辑结构变量都取 ln(1 + x)（源点数、平均路径长度取 log1p，路径数不变）')
+    ap.add_argument('--rating-only', action='store_true',
+                    help='研究范围再限定在“投资评级”是严格汇点的研报（measure 的 RATING_STRICT_SINK），之后照原规则做；'
+                         '只在 sample 环节起作用，单独跑其他环节时也要带上（决定输出目录）')
     ap.add_argument('--fig-dir', default=None, help='图的目录，默认 <输出目录>/figures/')
     ap.add_argument('--doc', default=None, help=f'pdf 环节要转换的 md，默认 <输出目录>/{DOC}（--log1p 时 {DOC_LOG1P}）；PDF 写在 md 旁边、同名')
 
 
-def default_out(sample, version, log1p):
-    """默认输出目录：output/studies/forecast_accuracy/<样本>_<版本>[_log1p]/；version 为 None 时用样本的主版本。"""
+def default_out(sample, version, log1p, rating_only=False):
+    """默认输出目录：output/studies/forecast_accuracy/<样本>_<版本>[_rating][_log1p]/；version 为 None 时用样本的主版本。"""
     from src import samples
-    return study_dir(STUDY, sample, version or samples.main_version(sample), '_log1p' if log1p else '')
+    suffix = ('_rating' if rating_only else '') + ('_log1p' if log1p else '')
+    return study_dir(STUDY, sample, version or samples.main_version(sample), suffix)
 
 
 def parse_parts(text):
@@ -143,6 +159,7 @@ class Ctx:
         self.src = dict(sample=args.sample, version=args.version)  # 读上游成品用的样本和版本
         self.hint = ((f' --sample {args.sample}' if args.sample != DEFAULT_SAMPLE else '')
                      + (f' --version {args.version}' if args.version else '')
+                     + (' --rating-only' if args.rating_only else '')
                      + (' --log1p' if args.log1p else '') + (f' --output {args.output}' if args.output else ''))
 
     def load(self, name, stage):
@@ -173,16 +190,18 @@ def stage_sample(c):
     from src import samples
     from src.graph.load import owners
     from src.studies.forecast_accuracy import figures, regressions, sample
-    S, D, P, R = sample.build(c.args.log1p, **c.src)
+    S, D, P, R = sample.build(c.args.log1p, **c.src, rating_only=c.args.rating_only)
     pl, rl = figures.peer_lag_frames(regressions.estimation_sample(D), c.args.sample)
-    print(f'  研究范围 {len(S)} 篇；研报层面样本 {len(D)} 篇，公司-券商层面样本 {len(P)} 对；数据文件 {len(R)} 行；'
+    print(f'  研究范围 {len(S)} 篇' + ('（--rating-only：“投资评级”是严格汇点）' if c.args.rating_only else '')
+          + f'；研报层面样本 {len(D)} 篇，公司-券商层面样本 {len(P)} 对；数据文件 {len(R)} 行；'
           f'图 2：{len(rl)} 篇、{len(pl)} 条同行预测')
     owner = owners(**c.src)
     vs = [owner[r] for r in S.report_id]
+    extra = dict(rating_only=True) if c.args.rating_only else {}  # 不给开关时不写这一项，manifest 与原来相同
     samples.write_manifest(
         c.out, study=STUDY, sample=c.args.sample, version=c.args.version or samples.main_version(c.args.sample),
         version_rule='照样本清单' if c.args.version in (None, samples.main_version(c.args.sample)) else '样本的全部研报都取自该版本',
-        log1p=bool(c.args.log1p), n_sample=len(samples.read(c.args.sample)), n_with_graph=len(owner),
+        log1p=bool(c.args.log1p), **extra, n_sample=len(samples.read(c.args.sample)), n_with_graph=len(owner),
         n_scope=len(S), scope_by_version={v: vs.count(v) for v in dict.fromkeys(vs)},
         n_report_sample=len(D), n_pair_sample=len(P))
     return [c.write(S, 'scope.parquet'), c.write(D, 'sample_report.parquet'), c.write(P, 'sample_pair.parquet'),
@@ -238,7 +257,7 @@ def stage_tables(c):
     pl, rl = c.load('figure2_peer_lags.parquet', 'sample'), c.load('figure2_report_lags.parquet', 'sample')
     files = [c.write(t, f'tables/{tables.FILES[k]}') for k, t in tables.reg_tables(reg).items()]
     nums = tables.text_numbers(S, D, P, reg, desc, dec, regressions.estimation_sample(D), pl, rl, figures.schematic_numbers(),
-                               **c.src)
+                               **c.src, rating_only=c.args.rating_only)
     print(f'  表 5–13 和 {len(nums)} 个正文数字')
     return files + [c.write(nums, f'tables/{tables.NUMBERS_FILE}')]
 
@@ -284,7 +303,7 @@ def run(args):
     samples.spec(args.sample)
     if args.version:
         version_spec(args.version)
-    out = Path(args.output) if args.output else default_out(args.sample, args.version, args.log1p)
+    out = Path(args.output) if args.output else default_out(args.sample, args.version, args.log1p, args.rating_only)
     out.mkdir(parents=True, exist_ok=True)
     c = Ctx(args, out, Path(args.fig_dir) if args.fig_dir else out / figures.FIG_SUBDIR, only)
     for name in parts:

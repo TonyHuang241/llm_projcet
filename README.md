@@ -12,7 +12,7 @@
 
 | 版本 | 规则 | 库 | 状态 |
 |---|---|---|---|
-| `v1` | 现行的代码和提示词（`src/graph/v1/`），每块 5000 字 | `output/graph/v1/`：979 篇（重构前 `deep` 运行的 975 篇，另有 4 篇石头科技的短篇深度报告：在“正文超过 5000 字”这条规则之前抽好、存档仍有效） | 默认版本，可以继续往里抽 |
+| `v1` | 现行的代码和提示词（`src/graph/v1/`），每块 5000 字 | `output/graph/v1/`：17956 篇（重构前 `deep` 运行的 975 篇和 4 篇石头科技的短篇深度报告，加上 2026-11-25 补抽的 `hs300_full` 其余研报） | 默认版本，可以继续往里抽 |
 | `v0` | 早期试跑：每块 2500 字、重构前的代码（在 git 标签 `pre-cleanup` 里），现在已不能完全复现 | `output/graph/v0/`：65 篇（重构前的 `pilot` 运行，7 家公司） | 只有数据、没有代码，只读 |
 
 现有的样本：
@@ -20,7 +20,7 @@
 | 样本 | 说明 | 篇数 | 研究范围 |
 |---|---|---|---|
 | `hs300_deep` | 沪深300 深度研报，现有研究用的研报。重构前分析用的是 `deep`（全部公司的深度报告：首页有深度、首次覆盖、公司专题等类型标注，且正文超过 5000 字）和 `pilot` 两次运行的合并，同一篇取 `deep` 的；2026-11-25 从当时的输出冻结，不能重建 | 1019（v1 975、v0 44） | 另限 `data/hs300_2024_dag_covered.csv` 的 241 家公司，再要求图里有边：791 篇（v1 766、v0 25） |
-| `hs300_full` | 沪深300 成分股的全部个股研报：`index_stock.parquet` 里 `000300` 在 20231229、20240628、20241231 三期的并集（328 家）；元数据表里能识别公司的个股研报，代码在成分股里 | 17748（326 家公司，全部取自 v1；库里已有 767 篇，还缺 16981 篇，尚未抽取） | 不另限公司 |
+| `hs300_full` | 沪深300 成分股的全部个股研报：`index_stock.parquet` 里 `000300` 在 20231229、20240628、20241231 三期的并集（328 家）；元数据表里能识别公司的个股研报，代码在成分股里 | 17748（326 家公司，全部取自 v1；2026-11-25 已全部抽完） | 不另限公司 |
 
 读成品时（`src/graph/load.py`、`src/measure/load.py`）清单决定每篇取自哪个版本，各版本按样本登记的版本顺序上下拼接（`hs300_deep`：v1 在前、v0 在后），版本内保持库里文件的行序——回归对求和顺序敏感，行序不能变。研究和读取函数还可以另给 `--version`：给的是样本的主版本（登记的第一个版本）时照清单取；给的是别的版本时，样本的全部研报都从那个版本的库里取（开新版本后比较新旧版本用）。
 
@@ -80,13 +80,15 @@ output/
   measure/v1/report_measures.parquet          逻辑结构变量（与样本无关，库里每篇一行）
   measure/v0/report_measures.parquet
   accuracy/hs300_deep/                        预测准确度（只和研报范围有关，与抽取版本无关）+ manifest.json
+  accuracy/hs300_full/                        同上，hs300_full 的全部研报（不按“投资评级”限定，各研究范围共用）
   studies/forecast_accuracy/hs300_deep_v1/        回归输出 + 文档（md、pdf、figures/）+ manifest.json
   studies/forecast_accuracy/hs300_deep_v1_log1p/  对数变量版，同样带自己的文档和 figures/
+  studies/forecast_accuracy/hs300_full_v1_rating/ hs300_full 里“投资评级”是严格汇点的研报（--rating-only），带自己的文档和 figures/
   experiments/graph_stability/                同一批研报重复抽取的结果，用来衡量抽取噪声
   archive/docs/                               已不维护的旧文档
 ```
 
-研究输出目录名是 `<样本>_<版本>`（样本里个别研报取自别的版本时以清单为准，目录名用主版本）。每个研究输出目录和 accuracy 的样本目录里有 `manifest.json`：样本、版本、是否 log1p、研报篇数、各版本篇数、生成时间。
+研究输出目录名是 `<样本>_<版本>`（样本里个别研报取自别的版本时以清单为准，目录名用主版本），`--rating-only` 时加 `_rating`，`--log1p` 时再加 `_log1p`。每个研究输出目录和 accuracy 的样本目录里有 `manifest.json`：样本、版本、是否 log1p（给了 `--rating-only` 时另记 `rating_only: true`）、研报篇数、各版本篇数、生成时间。
 **git 只跟踪 `output/` 下的研究文档**（`output/studies/` 下的 md、pdf、`figures/` 里的图）和 `output/archive/` 下的全部；parquet、csv、cache 等其余结果不入 git（见 `.gitignore`）。
 
 ### 旧路径到新路径（2026-11-25）
@@ -121,9 +123,10 @@ output/
 | `python run.py unify [--version v1]` | 跨研报统一概念名称（可选） | `output/graph/<版本>/` | 同一目录 | 是 | — |
 | `python run.py measure [--version v1]` | 逻辑结构变量 | `output/graph/<版本>/` | `output/measure/<版本>/` | 否 | 3 秒 |
 | `python run.py accuracy [--sample hs300_deep]` | 预测准确度和控制变量 | 样本的研报表、`data/` 的预测表、行情、财务 | `output/accuracy/<样本>/` | 否 | 20 秒 |
-| `python run.py study forecast_accuracy [--sample hs300_deep] [--version v1] [--log1p]` | 样本、描述性统计、方差分解、回归、文档的表和图（分环节，见下文） | graph、measure、accuracy 的成品、`data/`（含 `forecast_errors.parquet`） | `output/studies/forecast_accuracy/<样本>_<版本>[_log1p]/` | 否 | 1.5 分钟 |
+| `python run.py study forecast_accuracy [--sample hs300_deep] [--version v1] [--rating-only] [--log1p]` | 样本、描述性统计、方差分解、回归、文档的表和图（分环节，见下文） | graph、measure、accuracy 的成品、`data/`（含 `forecast_errors.parquet`） | `output/studies/forecast_accuracy/<样本>_<版本>[_rating][_log1p]/` | 否 | 1.5 分钟（hs300_full --rating-only 约 8 分钟，其中回归 5 分钟） |
 | `python run.py study forecast_accuracy --part pdf` | 文档 md 转 PDF | 输出目录里的 md 和 `figures/` | md 旁边同名 `.pdf` | 否 | 几秒 |
 | `python run.py study concept_coverage [--sample hs300_deep] [--concept 投资评级 --tag rating]` | 检查工具：多少篇研报抽到了某个概念、它在图里的位置（见下文） | graph 的成品 | `output/studies/concept_coverage/<样本>_<版本>/<tag>/` | 否 | 几秒 |
+| `python run.py study structure_distribution [--sample hs300_deep] [--rating-only]` | 检查工具：六个逻辑结构变量（原始值）的分布（见下文） | measure、graph 的成品 | `output/studies/structure_distribution/<样本>_<版本>[_rating]/` | 否 | 几秒 |
 
 每个步骤的选项用 `python run.py <步骤> --help` 查看，各步骤的口径写在 `src/<步骤>/` 各文件开头。
 只想重现文档里的数字时，依次运行 `measure`（`--version v1`、`--version v0` 各一次）、`accuracy`、`study` 即可，不需要重新清理文本和抽取。
@@ -143,6 +146,7 @@ output/
 | `python run.py study forecast_accuracy --part describe,tables` | 只做列出的环节（sample、describe、decomp、regress、tables、figures、pdf），各环节只读前面环节存在输出目录里的成品 |
 | `python run.py study forecast_accuracy --part regress --blocks paired,firm_broker:paired` | 只重估这几个回归块，`reg_all.csv` 里其余行不动 |
 | `python run.py study forecast_accuracy --part pdf [--doc <md 路径>]` | 文档转 PDF，默认输出目录里的主文档（`--log1p` 时是对数变量版） |
+| `python run.py study forecast_accuracy --sample hs300_full --rating-only --part tables` | `--rating-only` 范围的输出目录（`hs300_full_v1_rating/`）里只重出表和正文数字；单独跑环节时也要带上 `--rating-only` |
 
 ## 约定
 
@@ -209,7 +213,7 @@ v1 库的名称统一没有做完：合并提议 7036 组已做完，复核做�
 
 ### measure：逻辑结构变量
 
-对一个版本的库里的全部研报各算一行（v1 979 篇、v0 65 篇），写 `output/measure/<版本>/report_measures.parquet`；按样本读用 `src/measure/load.py` 的 `read_measures`（默认 `hs300_deep` 的 1019 篇）。口径见 `src/measure/variables.py`。
+对一个版本的库里的全部研报各算一行（v1 17956 篇——2026-11-25 抽完 hs300_full 后重算，原有 979 篇的值逐位不变；v0 65 篇），写 `output/measure/<版本>/report_measures.parquet`；按样本读用 `src/measure/load.py` 的 `read_measures`（默认 `hs300_deep` 的 1019 篇）。口径见 `src/measure/variables.py`。
 
 - 源点：没有入边的概念；严格汇点：有入边、没有出边的概念；路径：从源点到汇点的有向路径。
 - 两套变量各三个：源点数、ln(1 + 路径数)、平均路径长度。
@@ -247,6 +251,8 @@ v1 库的名称统一没有做完：合并提议 7036 组已做完，复核做�
 
 `--log1p` 把六个逻辑结构变量都取 ln(1 + x)，只在 `sample` 环节改变变换，输出在 `…/hs300_deep_v1_log1p/`，单独跑其他环节时也要带上 `--log1p`（或同一个 `--output`）。
 
+`--rating-only` 把研究范围再限定在“投资评级”是严格汇点（入度 > 0、出度 = 0，measure 的 `RATING_STRICT_SINK`）的研报，`RT_*` 三个变量在范围内全部有定义；之后的基础样本、券商分组、缩尾、标准化、公司-券商层面的样本对都在这个范围内照原规则做。它同样只在 `sample` 环节起作用，输出目录名加 `_rating`（和 `--log1p` 同时给时是 `_rating_log1p`），单独跑其他环节时也要带上。不给时行为和以前完全相同。现有的一份是 `python run.py study forecast_accuracy --sample hs300_full --rating-only`：hs300_full 里 8468 篇（47.7%）的“投资评级”是严格汇点，另一半研报的“投资评级”没有连进图（原因未查），这份结果不能外推到全部研报。行业表里没有、也不在 `MANUAL_INDUSTRY` 里的公司（hs300_full 里只有 601059 信达证券）行业记缺失，只在含行业固定效应的回归和方差分解的“行业”一列里不用。
+
 主要输出：
 
 - `sample_report.parquet`、`sample_pair.parquet`：两个层面的回归样本。
@@ -259,6 +265,10 @@ v1 库的名称统一没有做完：合并提议 7036 组已做完，复核做�
 ### study concept_coverage：概念覆盖检查（独立工具）
 
 统计一个样本里有多少篇研报的概念表里有某个概念（默认“投资评级”，完全同名）、它是否在图里、是否是严格汇点（口径同 `measure`），以及没有同名概念时的近似名称（`--contains`，默认“评级”）和别名；按正文字数、块数、券商分组。只读 graph 的成品，不调用大模型，不在主流程里，也不被其他步骤调用，需要时手动运行，每次覆盖自己的输出。例：`python run.py study concept_coverage --sample hs300_full`；换概念时要给输出子目录名，如 `--concept 营业收入 --tag revenue`。输出在 `output/studies/concept_coverage/<样本>_<版本>/<tag>/`（`summary.md`、`summary.csv`、`by_*.csv`、`variant_names.csv`、每篇一行的 `reports.parquet`、`manifest.json`），口径和各文件见 `src/studies/concept_coverage/__init__.py` 开头。
+
+### study structure_distribution：逻辑结构变量的分布（独立工具）
+
+统计回归用的六个逻辑结构变量（RT_NSRC、RT_LNPATH、RT_PATHLEN、WG_NSRC、WG_LNPATH、WG_PATHLEN）、两个路径条数和 `--log1p` 用的四个对数变换列的分布（分位数、偏度、峰度、取最小值的占比等），四个整数变量的频数表，按正文字数分组的均值和中位数，以及原始值和对数变换后的直方图，用来判断偏态和取对数是否合适。统计的是 measure 的原始值（不缩尾、不标准化），每个变量在它有定义的研报上统计；默认范围是样本里库中有结果的全部研报，`--rating-only` 只看“投资评级”是严格汇点的研报（不套公司名单，所以可能比 forecast_accuracy 同名开关的范围大）。只读 measure 和 graph 的成品，不调用大模型，不在主流程里，也不被其他步骤调用，每次覆盖自己的输出。例：`python run.py study structure_distribution --sample hs300_full --rating-only`。输出在 `output/studies/structure_distribution/<样本>_<版本>[_rating]/`（`summary.md`、`summary.csv`、`frequency.csv`、`by_length.csv`、`histograms.png`、`histograms_log1p.png`、`manifest.json`），口径和各文件见 `src/studies/structure_distribution/__init__.py` 开头。
 
 ## 数据
 

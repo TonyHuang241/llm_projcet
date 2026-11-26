@@ -17,7 +17,7 @@
                （早期试跑的 7 家公司，65 篇）两次运行的合并，同一篇取 deep 的；只在 pilot 里的 44 篇取自 v0。
                2026-11-25 从当时的输出冻结成 hs300_deep.csv，行序 = 当时下游读到的行序（deep 的文件行序，再接 pilot 独有的）。
                研究范围另限：公司在 data/hs300_2024_dag_covered.csv（241 家）里，研究代码再要求图里至少有一条边。
-  hs300_full   沪深300 成分股的全部个股研报，全部取自 v1（尚未抽取）。按规则建清单（build_hs300_full）：
+  hs300_full   沪深300 成分股的全部个股研报，全部取自 v1（2026-11-25 已全部抽完）。按规则建清单（build_hs300_full）：
                成分股 = data/market_data/index_stock.parquet 里 index_code == '000300' 在 20231229、20240628、20241231 三期的并集；
                研报 = 研报元数据表里 is_stock_report 为真、status == 'ok'、stock_code、company、broker 都非空，且代码前 6 位在成分股里。
                研究范围不另限公司。
@@ -57,16 +57,17 @@ def build_hs300_full():
 
 
 # 样本登记表：versions 是读成品时各版本上下拼接的顺序，第一个是主版本（研究输出目录名用它）；
-# companies 是研究范围另限的公司名单（csv，stock_code 列），None 表示不另限；frozen 的清单不能按规则重建
+# companies 是研究范围另限的公司名单（csv，stock_code 列），None 表示不另限；frozen 的清单不能按规则重建；
+# noun 是研究输出（正文数字的说明文字）里称呼样本研报的词
 SAMPLES = {
     'hs300_deep': dict(
-        title='沪深300 深度研报（现有研究的 1019 篇）',
+        title='沪深300 深度研报（现有研究的 1019 篇）', noun='深度研报',
         versions=('v1', 'v0'), frozen=True, build=None,
         companies=DATA_DIR / 'hs300_2024_dag_covered.csv',
         origin='重构前 deep 运行（全部公司的深度报告：首页有深度报告类标注、正文超过 5000 字，975 篇）与 '
                'pilot 运行（7 家试跑公司）的合并，同一篇取 deep 的；2026-11-25 从当时的输出冻结'),
     'hs300_full': dict(
-        title='沪深300 成分股的全部个股研报',
+        title='沪深300 成分股的全部个股研报', noun='样本内研报',
         versions=('v1',), frozen=False, build=build_hs300_full,
         companies=None,
         origin="index_stock.parquet 里 index_code == '000300' 在 20231229、20240628、20241231 三期并集的成分股；"

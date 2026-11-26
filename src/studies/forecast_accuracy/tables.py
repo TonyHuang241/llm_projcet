@@ -338,17 +338,21 @@ def actual_of(D, code, year):
     return float(vals[0])
 
 
-def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT_SAMPLE, version=None):
+def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT_SAMPLE, version=None, rating_only=False):
     """S 研究范围，D 研报层面样本，P 公司-券商层面样本，reg 回归长表，desc 逻辑结构变量的描述性统计，dec 方差分解，
     est 基准回归估计样本，pl / rl 图 2 的同行明细和每篇研报，schematic 图 1 例子的指标；sample、version：读 graph 概念表用的
-    样本和版本（同 sample.scope）。返回 text_numbers.csv 的 DataFrame。
-    “内容”一栏不写具体数字（数字在“数值”“显示”里），主窗口的变量名都由 sample.MAIN_H 派生。"""
+    样本和版本（同 sample.scope）；rating_only：研究范围是否另限“投资评级”是严格汇点（--rating-only，只影响说明文字）。
+    返回 text_numbers.csv 的 DataFrame。
+    “内容”一栏不写具体数字（数字在“数值”“显示”里），主窗口的变量名都由 sample.MAIN_H 派生；称呼样本研报的词取自样本登记的
+    noun（hs300_deep 是“深度研报”，公司-券商层面 EVAL_IS_DEEP 一类数字的说明用它）。"""
     from src import samples
     from src.config import ROOT_DIR
     from src.graph.load import read_table
     from src.measure.variables import RATING_NODE
     G = Reg(reg)
     companies = samples.spec(sample)['companies']
+    noun = samples.spec(sample).get('noun', '研报')
+    rating_rule = '，且 measure 的 RATING_STRICT_SINK 为真（--rating-only：“投资评级”是严格汇点）' if rating_only else ''
     rows = []
     Hm = f'H{MAIN_H}'
 
@@ -369,8 +373,8 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
     base = G.cell('report', 'fe_steps', Y_MAIN, 'firm+broker', 'WG_NSRC')
     rate = G.cell('report', 'fe_steps', Y_MAIN, 'firm+broker', 'RT_NSRC')
     add('1.1', '样本研报篇数（研究范围）', len(S), 0,
-        f'研究范围：公司在覆盖名单（{companies.relative_to(ROOT_DIR).as_posix()}）里、graph 研报表 n_edges > 0 的研报篇数' if companies
-        else f'研究范围：样本 {sample} 里 graph 研报表 n_edges > 0 的研报篇数')
+        (f'研究范围：公司在覆盖名单（{companies.relative_to(ROOT_DIR).as_posix()}）里、graph 研报表 n_edges > 0 的研报篇数' if companies
+         else f'研究范围：样本 {sample} 里 graph 研报表 n_edges > 0 的研报篇数') + rating_rule)
     add('1.1', '基础样本篇数', len(D), 0, '研报层面样本（匹配到本篇预测、有 H1 预测和实际值、发布于 H1 财年年报公告之前）')
     add('1.1', f'满足条件的研报篇数（主变量 {Y_MAIN} 非缺失）', int(D[Y_MAIN].notna().sum()), 0, f'基础样本中 {Y_MAIN} 非缺失的篇数')
     add('1.1（对照，非文档数字）', f'自算 {OWN_MAIN} 非缺失的篇数', int(D[OWN_MAIN].notna().sum()), 0, f'基础样本中 {OWN_MAIN} 非缺失的篇数')
@@ -512,12 +516,12 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
     add('3.6', '其中在数据文件里找到的对数', int(e.loc[em, 'EVAL_FILE_FOUND'].sum()), 0, '同上各对中 EVAL_FILE_FOUND 的对数')
     add('3.6', '被评价预测发布于 2024 年 1–11 月的对数', int((~em).sum()), 0, '同上，1–11 月')
     add('3.6', '其中在数据文件里找到的对数（1–11 月）', int(e.loc[~em, 'EVAL_FILE_FOUND'].sum()), 0, '同上各对中 EVAL_FILE_FOUND 的对数')
-    add('3.6', '被评价的预测正好出自深度研报的占比（%）', e.EVAL_IS_DEEP.mean() * 100, 0,
+    add('3.6', f'被评价的预测正好出自{noun}的占比（%）', e.EVAL_IS_DEEP.mean() * 100, 0,
         f'公司-券商层面样本中有被评价预测的 {len(e)} 对（全部样本对，不是估计样本）里 EVAL_IS_DEEP（{Hm} 的被评价预测）的占比 × 100')
     est_p = P[P[Y_MAIN].notna() & P.WG_NSRC.notna()]
-    add('3.6', f'{Y_MAIN} 非缺失的对中被评价预测出自深度研报的占比（%）', est_p.EVAL_IS_DEEP.mean() * 100, 0,
+    add('3.6', f'{Y_MAIN} 非缺失的对中被评价预测出自{noun}的占比（%）', est_p.EVAL_IS_DEEP.mean() * 100, 0,
         f'{Y_MAIN} 非缺失的 {len(est_p)} 对里 EVAL_IS_DEEP 的占比 × 100')
-    add('3.6', '最后一次预测晚于深度研报的间隔中位数（天）', e.loc[e.EVAL_GAP > 0, 'EVAL_GAP'].median(), 0, '有被评价预测的各对中 EVAL_GAP > 0 的中位数（天）')
+    add('3.6', f'最后一次预测晚于{noun}的间隔中位数（天）', e.loc[e.EVAL_GAP > 0, 'EVAL_GAP'].median(), 0, '有被评价预测的各对中 EVAL_GAP > 0 的中位数（天）')
     add('3.6', f'{Y_MAIN} 非缺失的对中间隔中位数（天）', est_p.loc[est_p.EVAL_GAP > 0, 'EVAL_GAP'].median(), 0, f'{Y_MAIN} 非缺失的各对中 EVAL_GAP > 0 的中位数')
     for ty, n in est_p[hv('TY')].value_counts().sort_index().items():
         add('3.6', f'{Y_MAIN} 非缺失的对中被评价预测目标年度为 {int(ty)} 的对数', n, 0, f'同上各对中 {hv("TY")} = {int(ty)} 的对数')

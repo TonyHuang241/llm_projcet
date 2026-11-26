@@ -9,8 +9,13 @@
   （src/samples 的 companies，hs300_deep 是 data/hs300_2024_dag_covered.csv 的 241 家）时再限定在名单里的公司。
   行序同 src.graph.load.read_table('reports', 样本)（按样本登记的版本顺序拼接，hs300_deep 是 v1 在前、v0 在后，版本内按库的
   文件行序）。回归的行序就是这个顺序（求和顺序影响浮点数的末位，所以保持不变）。
-  broker_g  在这 791 篇里按 graph 研报表的 broker 计数，不少于 MIN_BROKER 篇的用券商名，否则记“其他”。
-  sw        申万一级行业：data/market_data/industry.xlsx（Wind 导出），缺的两只按 MANUAL_INDUSTRY 补。
+  --rating-only（build / scope 的 rating_only=True）时在上面两条之后再限定在“投资评级”是严格汇点的研报（measure 的
+  RATING_STRICT_SINK 为真；样本 hs300_full、版本 v1 时 8468 篇），行序不变；下面的券商分组和之后的一切都在这个范围内做。
+  broker_g  在研究范围（hs300_deep 是这 791 篇）里按 graph 研报表的 broker 计数，不少于 MIN_BROKER 篇的用券商名，否则记“其他”
+            （门槛是篇数，不随范围大小调整）。
+  sw        申万一级行业：data/market_data/industry.xlsx（Wind 导出），hs300_deep 里缺的两只按 MANUAL_INDUSTRY 补。行业表和
+            MANUAL_INDUSTRY 都没有的公司 sw 记缺失（hs300_full 里只有 601059 信达证券，研究范围内 1 篇）：含行业固定效应的回归
+            （src.ols.fit 剔除固定效应缺失的观测）和方差分解的“行业”一列（fit_r2 前剔除）不用这些研报，其余设定照常使用。
   month     发布月份 YYYY-MM。
 
 预测窗口和主窗口
@@ -41,9 +46,12 @@
   X 在回归时再在各自的估计样本内标准化（src.ols.fit），时滞和控制变量不标准化。
 
 公司-券商层面（pair_sample，760 对）
-  样本对    791 篇里有 ORG_CL（匹配到本篇预测行）的研报构成的（公司，券商）对；被评价的预测、自算的比较组和 PMAFE、DAGE、
+  样本对    研究范围（791 篇）里有 ORG_CL（匹配到本篇预测行）的研报构成的（公司，券商）对；被评价的预测、自算的比较组和 PMAFE、DAGE、
             控制变量取自 accuracy 的 pair_accuracy 的主窗口列（*_H{MAIN_H}；被评价预测 = 券商 2024 年内最后一条第 MAIN_H 年
             预测，目标年度 TY_H{MAIN_H} 逐对不同；控制变量在该预测的发布日上度量），EVAL_IS_DEEP、EVAL_GAP 和六个控制变量去掉后缀。
+            pair_accuracy 按 accuracy 的整个样本算（不是研究范围）：EVAL_IS_DEEP = 被评价预测正好是该对在样本里某篇研报本身的
+            预测，EVAL_GAP 和 last_deep_dt 也按该对在样本里的全部研报算。列名沿用 hs300_deep 时的叫法（样本全是深度研报），
+            样本是 hs300_full 时“DEEP”指样本里的个股研报，不限深度研报、也不限研究范围（--rating-only 时不限“投资评级”是汇点）。
   Y         Y_MAIN（PMED180_NP_H2）= 数据文件里被评价预测所在研报（EVAL_RPT_ID 大写、sec == code、PROFIT、target_year == TY）
             那一行算出的 MAIN_DEF（errors.pair_y；EVAL_FILE_FOUND、EVAL_FILE_HORIZON 记录是否找到、那一行的 horizon）；
             自算的 PMAFE_H{MAIN_H} 留作对照。
@@ -75,7 +83,8 @@ from src.studies.forecast_accuracy import errors
 
 INDUSTRY = DATA_DIR / 'market_data' / 'industry.xlsx'  # 申万一级行业（2021）、证监会门类
 MANUAL_INDUSTRY = {'600837': ('金融业', '非银金融'), '601989': ('制造业', '国防军工')}  # 行业表里没有的两只（2025 年退市）：（证监会门类，申万一级）
-MIN_BROKER = 5  # 研究范围内不足这么多篇的券商并成“其他”
+# 只补 hs300_deep 里缺的这两只；别的样本里行业表也没有的公司不在这里硬编码，sw 记缺失（见模块说明）
+MIN_BROKER = 5  # 研究范围内不足这么多篇的券商并成“其他”（各样本、各范围同一个门槛）
 
 CTRL = ['SIZE_M', 'BM', 'MOM', 'VOL', 'ROA_T', 'LNAGE']
 PCT = ['MOM', 'VOL', 'ROA_T']  # 小数 -> %
@@ -156,10 +165,11 @@ def load_industry(path=INDUSTRY):
 
 
 # ---------------------------------------------------------------- 研究范围
-def scope(log1p=False, sample=DEFAULT_SAMPLE, version=None):
+def scope(log1p=False, sample=DEFAULT_SAMPLE, version=None, rating_only=False):
     """研究范围的研报（hs300_deep、v1 时 791 篇；行序同 graph 研报表），合并 accuracy 的全部列和 measure 的六个变量、两个路径
     条数的原始值（列名同上游，未缩尾；路径条数转成 float）；另加 broker_g、sw、month。log1p=True 时 LOG1P_X 四列换成
-    ln(1 + 原始值)。sample、version：从哪个样本、哪个抽取版本读上游成品（version 见 src/samples 的 assignment）。"""
+    ln(1 + 原始值)。sample、version：从哪个样本、哪个抽取版本读上游成品（version 见 src/samples 的 assignment）。
+    rating_only=True（--rating-only）时再限定在 measure 的 RATING_STRICT_SINK 为真的研报（在券商计数之前限定）。"""
     from src import samples
     from src.accuracy.load import report_accuracy
     from src.graph.load import read_table
@@ -170,6 +180,9 @@ def scope(log1p=False, sample=DEFAULT_SAMPLE, version=None):
     companies = samples.spec(sample)['companies']
     covered = r.code.isin(set(pd.read_csv(companies, dtype=str).stock_code.str[:6])) if companies else True
     r = r[covered & (r.n_edges > 0)].reset_index(drop=True)
+    if rating_only:
+        ss = read_measures(['RATING_STRICT_SINK'], sample=sample, version=version)
+        r = r[r.report_id.isin(set(ss.report_id[ss.RATING_STRICT_SINK.astype(bool)]))].reset_index(drop=True)
     bc = r.broker.value_counts()
     r['broker_g'] = np.where(r.broker.map(bc) >= MIN_BROKER, r.broker, '其他')
     r['sw'] = r.code.map(load_industry().set_index('code').sw)
@@ -182,6 +195,8 @@ def scope(log1p=False, sample=DEFAULT_SAMPLE, version=None):
     S = (r[['report_id', 'code', 'date', 'month', 'broker', 'broker_g', 'sw', 'n_edges']]
          .merge(acc, on='report_id', how='left', validate='1:1').merge(meas, on='report_id', how='left', validate='1:1'))
     assert S.base.notna().all() and S.WG_NSRC.notna().all(), '研究范围内有研报不在 accuracy / measure 的成品里'
+    if rating_only:
+        assert S.RATING_STRICT_SINK.astype(bool).all() and S.RT_NSRC.notna().all(), '--rating-only 的范围内有 RT_* 缺失的研报'
     S['base'] = S.base.astype(bool)
     return S
 
@@ -260,10 +275,10 @@ def pair_sample(S, rows, sample=DEFAULT_SAMPLE):
     return P[cols]
 
 
-def build(log1p=False, sample=DEFAULT_SAMPLE, version=None):
-    """(研究范围 791 篇, 研报层面样本, 公司-券商层面样本, 数据文件里用到的行)。log1p 见模块说明；sample、version 同 scope。
-    数据文件的行 = report_id 属于研究范围或公司-券商层面被评价预测（EVAL_RPT_ID_H{MAIN_H}）的全部行（不管 sec）。"""
+def build(log1p=False, sample=DEFAULT_SAMPLE, version=None, rating_only=False):
+    """(研究范围 791 篇, 研报层面样本, 公司-券商层面样本, 数据文件里用到的行)。log1p 见模块说明；sample、version、rating_only
+    同 scope。数据文件的行 = report_id 属于研究范围或公司-券商层面被评价预测（EVAL_RPT_ID_H{MAIN_H}）的全部行（不管 sec）。"""
     from src.accuracy.load import pair_accuracy
-    S = scope(log1p, sample, version)
+    S = scope(log1p, sample, version, rating_only)
     rows = errors.read_rows(set(S.report_id) | set(pair_accuracy(columns=[hv('EVAL_RPT_ID')], sample=sample)[hv('EVAL_RPT_ID')].dropna()))
     return S, report_sample(S, rows), pair_sample(S, rows, sample), rows
