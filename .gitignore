@@ -10,6 +10,7 @@
 !/output/studies/**/figures/*.png
 !/output/studies/**/figures/*.svg
 !/output/studies/**/figures/*.jpg
+!/output/studies/structure_distribution/**/*.png
 !/output/archive/**
 
 # 敏感信息、本机配置与缓存
