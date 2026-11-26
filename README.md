@@ -123,6 +123,7 @@ output/
 | `python run.py accuracy [--sample hs300_deep]` | 预测准确度和控制变量 | 样本的研报表、`data/` 的预测表、行情、财务 | `output/accuracy/<样本>/` | 否 | 20 秒 |
 | `python run.py study forecast_accuracy [--sample hs300_deep] [--version v1] [--log1p]` | 样本、描述性统计、方差分解、回归、文档的表和图（分环节，见下文） | graph、measure、accuracy 的成品、`data/`（含 `forecast_errors.parquet`） | `output/studies/forecast_accuracy/<样本>_<版本>[_log1p]/` | 否 | 1.5 分钟 |
 | `python run.py study forecast_accuracy --part pdf` | 文档 md 转 PDF | 输出目录里的 md 和 `figures/` | md 旁边同名 `.pdf` | 否 | 几秒 |
+| `python run.py study concept_coverage [--sample hs300_deep] [--concept 投资评级 --tag rating]` | 检查工具：多少篇研报抽到了某个概念、它在图里的位置（见下文） | graph 的成品 | `output/studies/concept_coverage/<样本>_<版本>/<tag>/` | 否 | 几秒 |
 
 每个步骤的选项用 `python run.py <步骤> --help` 查看，各步骤的口径写在 `src/<步骤>/` 各文件开头。
 只想重现文档里的数字时，依次运行 `measure`（`--version v1`、`--version v0` 各一次）、`accuracy`、`study` 即可，不需要重新清理文本和抽取。
@@ -254,6 +255,10 @@ v1 库的名称统一没有做完：合并提议 7036 组已做完，复核做�
 - `figures/` 下的两张图；文档 `研报逻辑结构与分析师预测准确度.md` 和 `.pdf`（对数变量版的目录里是 `…_对数变量.md`）。
 
 文档的每张表、每张图、每一节对应哪个输出文件、由哪个函数生成，列在 `src/studies/forecast_accuracy/__init__.py` 开头。
+
+### study concept_coverage：概念覆盖检查（独立工具）
+
+统计一个样本里有多少篇研报的概念表里有某个概念（默认“投资评级”，完全同名）、它是否在图里、是否是严格汇点（口径同 `measure`），以及没有同名概念时的近似名称（`--contains`，默认“评级”）和别名；按正文字数、块数、券商分组。只读 graph 的成品，不调用大模型，不在主流程里，也不被其他步骤调用，需要时手动运行，每次覆盖自己的输出。例：`python run.py study concept_coverage --sample hs300_full`；换概念时要给输出子目录名，如 `--concept 营业收入 --tag revenue`。输出在 `output/studies/concept_coverage/<样本>_<版本>/<tag>/`（`summary.md`、`summary.csv`、`by_*.csv`、`variant_names.csv`、每篇一行的 `reports.parquet`、`manifest.json`），口径和各文件见 `src/studies/concept_coverage/__init__.py` 开头。
 
 ## 数据
 
