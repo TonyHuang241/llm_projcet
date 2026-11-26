@@ -6,6 +6,11 @@
   系数格后面跟显著性星号（* p < 0.10、** p < 0.05、*** p < 0.01，p 值用 t(公司数 − 1)），t 值在括号里；梯子表（表 6、8、12）和
   不同误差定义表（表 9–11）的一格是“系数星号 (t)”，N 一列为“投资评级概念对应的逻辑结构各列 / 全文逻辑结构各列”的观测数；
   某一格回归样本不足（reg_all 里没有）时写 NA。
+目标（--target，sample.XVars）：下面写 RT、RateSrc、“投资评级概念对应的逻辑结构”的地方，revenue 目标下是 RV、RevSrc、
+“营收类汇点对应的逻辑结构”（列名、表头、正文数字的说明都跟着换）；以 xv 为参数的函数默认 rating，输出与加开关之前相同。
+--target none（不用子图变量，xv.XT 为空）：表 7、13 不输出；表 3–6、8–12 只有 WG 三个变量，N 一列只有一个数；text_numbers 里
+只描述子图变量的行不输出，原来对子图三个变量逐一报告的数字（xv.focus：2.2 的分解区间和相关、2.3、4.1、4.5、4.8、4.9）改为
+WG 三个变量（说明文字里写 WG、AllSrc 等）。
 被解释变量都用主窗口（sample.MAIN_H，现为 H2）的主变量 Y_MAIN（sample.MAIN_DEF，现为 PMED180_NP）；表 8“其他预测窗口”是其余
 两个窗口（sample.OTHER_H，现为 H1、H3）的同名变量 ymain(h) 各一个 Panel，csv 第一列“窗口”区分。下面 Ym 指主变量。
 
@@ -27,6 +32,9 @@
 
 text_numbers.csv：正文、图注和第 4 节出现的数字，每个数字一行：位置、内容、数值（原始精度）、小数位（文档显示的位数）、
 显示（按小数位四舍五入）、星号、算法（怎么算的）。
+target_nodes.csv（只有目标节点可以不止一个的目标才写，现在是 revenue；rating 不写）：研究范围内各研报的目标节点（TARGETS 的
+nodes，按 graph 边表 in_dag 的边建图现取，与 measure 同口径）按名称计数：名称、研报篇数（一篇里同名只计一次）、占研究范围的比例（%），
+按篇数从多到少、同篇数按名称排序；文档 1.2 节的常见名称取自它。
 
 预测误差变量的描述性统计（error_stats.csv、表 1）：786 篇基础样本里各列各自的非缺失值（缩尾后 / 缩尾前），统计量同下；表 1 用
 缩尾后的值，IFE、IFEALL、RAWFE 乘 100（占 D 的百分点），其余原样。
@@ -51,13 +59,34 @@ from src.ols import fe_dummies, stars, t_pvalue
 from src.studies.forecast_accuracy.errors import DEFS, METRICS, yname
 from src.studies.forecast_accuracy.regressions import estimation_sample
 from src.studies.forecast_accuracy.sample import (HORIZONS, LAG_MAIN, LNN_MAIN, MAIN_DEF, MAIN_H, MAIN_WIN, N_MAIN, NPEERS_MAIN,
-                                                  OTHER_H, OWN_MAIN, SCORE_MAIN, X6, Y_MAIN, hv, ymain)
+                                                  OTHER_H, OWN_MAIN, SCORE_MAIN, XV, Y_MAIN, hv, ymain)
 
-LABEL = dict(zip(X6, ['RateSrc', 'RatePath', 'RateLen', 'AllSrc', 'AllPath', 'AllLen']))
-GROUP = {x: '投资评级概念对应的逻辑结构' if x.startswith('RT') else '全文逻辑结构' for x in X6}
-DESC_X = ['RT_NSRC', 'RT_N_PATHS', 'RT_PATHLEN', 'WG_NSRC', 'WG_N_PATHS', 'WG_PATHLEN']  # 表 3 的行
-DESC_LABEL = dict(zip(DESC_X, ['源点数（RateSrc）', '路径数（条）', '平均路径长度（RateLen）',
-                               '源点数（AllSrc）', '路径数（条）', '平均路径长度（AllLen）']))
+
+def desc_x(xv):
+    """表 3 的行：目标的源点数、路径条数、平均路径长度（--target none 时没有），再是全文的。"""
+    t = [f'{xv.pre}_NSRC', f'{xv.pre}_N_PATHS', f'{xv.pre}_PATHLEN'] if xv.XT else []
+    return t + ['WG_NSRC', 'WG_N_PATHS', 'WG_PATHLEN']
+
+
+def desc_label(xv):
+    t = [f'源点数（{xv.sym}Src）', '路径数（条）', f'平均路径长度（{xv.sym}Len）'] if xv.XT else []
+    return dict(zip(desc_x(xv), t + ['源点数（AllSrc）', '路径数（条）', '平均路径长度（AllLen）']))
+
+
+def n_col(G, level, block, y, fe, xv):
+    """梯子表、误差定义表的 N 一列：“目标各列 / 全文各列”的观测数；--target none 时只有全文各列一个数。"""
+    nw = G.n_of(level, block, y, fe, xv.XW)
+    return f'{G.n_of(level, block, y, fe, xv.XT)} / {nw}' if xv.XT else nw
+
+
+def pair_specs(xv):
+    """成对放入的三个 X 标签（reg_all 的 X 列）：'RT_NSRC+WG_NSRC' 等。"""
+    return ['+'.join(pr) for pr in xv.PAIRS]
+
+
+# 下面以 xv 为参数的函数里，xv 是目标的变量名（sample.XVars，默认 rating）；这几个常量是默认目标的取值
+X6, LABEL, GROUP = XV.X6, XV.label, XV.group
+DESC_X, DESC_LABEL = desc_x(XV), desc_label(XV)  # 表 3 的行
 QUANTILES = {'P1': .01, 'P5': .05, 'P25': .25, '中位数': .5, 'P75': .75, 'P95': .95, 'P99': .99}
 TABLE1_STATS = ['N', '均值', '标准差', '最小值', 'P25', '中位数', 'P75', '最大值']
 FE_ROW = {'none': '无', 'industry': '行业', 'firm': '公司', 'firm+broker': '公司 + 券商'}
@@ -69,7 +98,7 @@ DECOMP_SPECS = [  # (名称, 文档列名, 固定效应列；列的先后决定�
 ]
 TABLE5_TERMS = [('G', None), ('Size', 'SIZE_M'), ('BM', 'BM'), ('Mom', 'MOM'), ('Vol', 'VOL'), ('ROA', 'ROA_T'), ('LnAge', 'LNAGE'),
                 ('PeerLag', LAG_MAIN)]
-PAIRS = ['RT_NSRC+WG_NSRC', 'RT_LNPATH+WG_LNPATH', 'RT_PATHLEN+WG_PATHLEN']
+PAIRS = pair_specs(XV)
 PAIR_COLS = ['(1) 源点数', '(2) 路径数', '(3) 平均路径长度']
 FILES = {1: 'table1_error_descriptive.csv', 2: 'consistency.csv', 3: 'table3_descriptive.csv', 4: 'table4_fe_decomposition.csv',
          5: 'table5_benchmark.csv', 6: 'table6_fe_steps.csv', 7: 'table7_paired.csv', 8: 'table8_other_horizons.csv',
@@ -77,6 +106,7 @@ FILES = {1: 'table1_error_descriptive.csv', 2: 'consistency.csv', 3: 'table3_des
          11: 'table11_definitions_other_horizons.csv', 12: 'table12_firm_broker.csv', 13: 'table13_firm_broker_paired.csv'}
 FIELDS_FILE = 'consistency_fields.csv'
 NUMBERS_FILE = 'text_numbers.csv'
+NODES_FILE = 'target_nodes.csv'  # 目标节点可以不止一个的目标（revenue）才写：研究范围内目标节点名称的频数
 PCT_DEFS = {'IFE75', 'IFE180', 'IFEALL75', 'IFEALL180', 'RAWFE'}  # 占 D 的比例：表 1 乘 100
 
 
@@ -146,21 +176,22 @@ def table1(es, h=MAIN_H):
     return pd.DataFrame(rows)
 
 
-def descriptive_stats(D):
+def descriptive_stats(D, xv=XV):
     """六个逻辑结构变量 × 口径（缩尾后、缩尾前）的描述性统计长表（样本见模块说明）。"""
-    est = {g: estimation_sample(D, x=g + '_NSRC') for g in ('RT', 'WG')}
+    est = {g: estimation_sample(D, x=g + '_NSRC') for g in ([xv.pre] if xv.XT else []) + ['WG']}
     rows = []
-    for x in DESC_X:
+    for x in desc_x(xv):
         for kind, col in (('缩尾后', x), ('缩尾前', x + '_RAW')):
-            rows.append({'变量': x, '口径': kind, '列': col, **stats_row(est[x[:2]][col])})
+            rows.append({'变量': x, '口径': kind, '列': col, **stats_row(est[x.split('_')[0]][col])})
     return pd.DataFrame(rows)
 
 
-def table3(desc):
+def table3(desc, xv=XV):
     rows = []
-    for x in DESC_X:
+    lab = desc_label(xv)
+    for x in desc_x(xv):
         z = desc[(desc.变量 == x) & (desc.口径 == '缩尾后')].iloc[0]
-        rows.append({'逻辑结构': GROUP[x] if x in ('RT_NSRC', 'WG_NSRC') else '', '变量': DESC_LABEL[x],
+        rows.append({'逻辑结构': xv.group[x] if x in (xv.X6[0], 'WG_NSRC') else '', '变量': lab[x],
                      **{k: str(int(z[k])) if k == 'N' else f'{z[k]:.6f}' for k in TABLE1_STATS}})
     return pd.DataFrame(rows)
 
@@ -178,10 +209,10 @@ def fit_r2(y, fe_frame):
     return r2, adj, k
 
 
-def variance_decomposition(D):
+def variance_decomposition(D, xv=XV):
     """六个变量 × 六组固定效应的 R² 和调整 R²（样本 = 该变量的基准回归估计样本）。"""
     rows = []
-    for x in X6:
+    for x in xv.X6:
         sub = estimation_sample(D, x=x)
         y = sub[x].to_numpy(float)
         for spec, _, fes in DECOMP_SPECS:
@@ -192,11 +223,11 @@ def variance_decomposition(D):
     return pd.DataFrame(rows)
 
 
-def table4(dec):
+def table4(dec, xv=XV):
     rows = []
-    for x in X6:
+    for x in xv.X6:
         z = dec[dec.variable == x].set_index('spec')
-        rows.append({'逻辑结构': GROUP[x] if x in ('RT_NSRC', 'WG_NSRC') else '', '变量': LABEL[x],
+        rows.append({'逻辑结构': xv.group[x] if x in (xv.X6[0], 'WG_NSRC') else '', '变量': xv.label[x],
                      **{col: f'{z.loc[spec, "adj_r2"] * 100:.6f}' for spec, col, _ in DECOMP_SPECS}})
     return pd.DataFrame(rows)
 
@@ -237,8 +268,9 @@ def cell_str(c, scale):
     return 'NA' if c is None else f'{coef_str(c, scale)} ({c.t:.6f})'
 
 
-def table5(G):
-    cols = {x: f'({i}) {GROUP[x]} {LABEL[x]}' for i, x in enumerate(X6, 1)}
+def table5(G, xv=XV):
+    X6 = xv.X6
+    cols = {x: f'({i}) {xv.group[x]} {xv.label[x]}' for i, x in enumerate(X6, 1)}
     rows = []
     for lab, term in TABLE5_TERMS:
         cs = {x: G.cell('report', 'fe_steps', Y_MAIN, 'firm+broker', x, term) for x in X6}
@@ -252,34 +284,36 @@ def table5(G):
     return pd.DataFrame(rows)
 
 
-def ladder(G, level, block, y, scale):
+def ladder(G, level, block, y, scale, xv=XV):
     """表 6、8、12：行 = 固定效应四档，列 = 六个变量 + N；回归样本不足（reg_all 里没有）的格子写 NA。"""
+    X6, GROUP, LABEL = xv.X6, xv.group, xv.label
     rows = []
     for fe, lab in FE_ROW.items():
         r = {'固定效应': lab}
         for x in X6:
             r[f'{GROUP[x]} {LABEL[x]}'] = cell_str(G.cell(level, block, y, fe, x, missing_ok=True), scale)
-        r['N'] = f'{G.n_of(level, block, y, fe, X6[:3])} / {G.n_of(level, block, y, fe, X6[3:])}'
+        r['N'] = n_col(G, level, block, y, fe, xv)
         rows.append(r)
     return pd.DataFrame(rows)
 
 
-def other_horizons(G):
+def other_horizons(G, xv=XV):
     """表 8：其他预测窗口（OTHER_H 依次为 Panel A、B）的主变量 ymain(h)，设定同表 6；第一列“窗口”标明 Panel 和窗口。"""
-    parts = [ladder(G, 'report', 'fe_steps', ymain(h), 100).assign(窗口=f'Panel {"AB"[i]}：H{h}')
+    parts = [ladder(G, 'report', 'fe_steps', ymain(h), 100, xv).assign(窗口=f'Panel {"AB"[i]}：H{h}')
              for i, h in enumerate(OTHER_H)]
     t = pd.concat(parts, ignore_index=True)
     return t[['窗口'] + [c for c in t.columns if c != '窗口']]
 
 
-def paired(G, level, block, ctrl_label, fes=('firm+broker',)):
+def paired(G, level, block, ctrl_label, fes=('firm+broker',), xv=XV):
     """表 7、13：两类逻辑结构同名变量成对放入（主变量）；fes 有多档时每档一个 Panel（第一列“固定效应”）。"""
+    PAIRS = pair_specs(xv)
     parts = []
     for fe in fes:
         cs = {spec: (G.cell(level, block, Y_MAIN, fe, spec, spec.split('+')[0]),
                      G.cell(level, block, Y_MAIN, fe, spec, spec.split('+')[1])) for spec in PAIRS}
         rows = []
-        for i, lab in ((0, '投资评级概念对应的逻辑结构'), (1, '全文逻辑结构')):
+        for i, lab in ((0, xv.doc), (1, '全文逻辑结构')):
             rows.append({'': lab, **{col: coef_str(cs[s][i], 100) for s, col in zip(PAIRS, PAIR_COLS)}})
             rows.append({'': '(t)', **{col: f'({cs[s][i].t:.6f})' for s, col in zip(PAIRS, PAIR_COLS)}})
         for lab in (ctrl_label, '公司固定效应') + (('券商固定效应',) if fe == 'firm+broker' else ()):
@@ -291,33 +325,54 @@ def paired(G, level, block, ctrl_label, fes=('firm+broker',)):
     return t if len(fes) > 1 else t.drop(columns='固定效应')
 
 
-def definitions(G, h, fe):
+def definitions(G, h, fe, xv=XV):
     """表 9–11 的一块：窗口 h、固定效应 fe 下各定义 × 口径（加自算 PMAFE、SCORE）一行，列 = 六个 X + N。"""
+    X6, GROUP, LABEL = xv.X6, xv.group, xv.label
     rows = []
     for y, block, k, mk in def_rows(h):
         r = {'变量': y, '定义': k, '口径': mk}
         for x in X6:
             r[f'{GROUP[x]} {LABEL[x]}'] = cell_str(G.cell('report', block, y, fe, x, missing_ok=True), scale_of(y))
-        r['N'] = f'{G.n_of("report", block, y, fe, X6[:3])} / {G.n_of("report", block, y, fe, X6[3:])}'
+        r['N'] = n_col(G, 'report', block, y, fe, xv)
         rows.append(r)
     return pd.DataFrame(rows)
 
 
-def definitions_other(G):
+def definitions_other(G, xv=XV):
     """表 11：H1、H3（OTHER_H）× 两档固定效应的各定义，前两列“窗口”“固定效应”。"""
-    parts = [definitions(G, h, fe).assign(窗口=f'H{h}', 固定效应=FE_LABEL[fe]) for h in OTHER_H for fe in ('firm+broker', 'firm')]
+    parts = [definitions(G, h, fe, xv).assign(窗口=f'H{h}', 固定效应=FE_LABEL[fe]) for h in OTHER_H for fe in ('firm+broker', 'firm')]
     t = pd.concat(parts, ignore_index=True)
     return t[['窗口', '固定效应'] + [c for c in t.columns if c not in ('窗口', '固定效应')]]
 
 
-def reg_tables(reg):
-    """回归表 {表号: DataFrame}（表 5–13；表 1–4 由 describe、decomp 环节生成）。"""
+def reg_tables(reg, xv=XV):
+    """回归表 {表号: DataFrame}（表 5–13；表 1–4 由 describe、decomp 环节生成）；xv：目标的变量名（sample.XVars）。
+    --target none 时没有成对放入的表 7、13。"""
     G = Reg(reg)
-    return {5: table5(G), 6: ladder(G, 'report', 'fe_steps', Y_MAIN, 100),
-            7: paired(G, 'report', 'paired', '控制变量 X 和 PeerLag', ('firm+broker', 'firm')),
-            8: other_horizons(G), 9: definitions(G, MAIN_H, 'firm+broker'), 10: definitions(G, MAIN_H, 'firm'),
-            11: definitions_other(G), 12: ladder(G, 'firm_broker', 'fe_steps', Y_MAIN, 100),
-            13: paired(G, 'firm_broker', 'paired', '控制变量 X 和 DAge')}
+    out = {5: table5(G, xv), 6: ladder(G, 'report', 'fe_steps', Y_MAIN, 100, xv),
+           7: paired(G, 'report', 'paired', '控制变量 X 和 PeerLag', ('firm+broker', 'firm'), xv) if xv.XT else None,
+           8: other_horizons(G, xv), 9: definitions(G, MAIN_H, 'firm+broker', xv), 10: definitions(G, MAIN_H, 'firm', xv),
+           11: definitions_other(G, xv), 12: ladder(G, 'firm_broker', 'fe_steps', Y_MAIN, 100, xv),
+           13: paired(G, 'firm_broker', 'paired', '控制变量 X 和 DAge', xv=xv) if xv.XT else None}
+    return {k: t for k, t in out.items() if t is not None}
+
+
+# ---------------------------------------------------------------- 目标节点名称（revenue 等多节点目标）
+def target_nodes(S, sample=DEFAULT_SAMPLE, version=None, xv=XV):
+    """研究范围 S 内目标节点名称的频数（列见模块说明）；按 graph 的边表现建图，节点个数与 S 的 count 列逐篇核对。"""
+    from collections import Counter
+
+    from src.graph.load import load_graphs
+    graphs = load_graphs(list(S.report_id), sample, version)
+    cnt, per = Counter(), []
+    for rid in S.report_id:
+        ns = xv.nodes(graphs[rid])
+        per.append(len(ns))
+        cnt.update(set(ns))
+    assert per == [int(v) for v in S[xv.count]], '现算的目标节点个数与 measure 的不一致'
+    t = pd.DataFrame(sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0])), columns=['名称', '研报篇数'])
+    t['占研究范围的比例（%）'] = t.研报篇数 / len(S) * 100
+    return t
 
 
 # ---------------------------------------------------------------- 正文数字
@@ -338,21 +393,27 @@ def actual_of(D, code, year):
     return float(vals[0])
 
 
-def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT_SAMPLE, version=None, rating_only=False):
+def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT_SAMPLE, version=None, target_only=False, xv=XV):
     """S 研究范围，D 研报层面样本，P 公司-券商层面样本，reg 回归长表，desc 逻辑结构变量的描述性统计，dec 方差分解，
     est 基准回归估计样本，pl / rl 图 2 的同行明细和每篇研报，schematic 图 1 例子的指标；sample、version：读 graph 概念表用的
-    样本和版本（同 sample.scope）；rating_only：研究范围是否另限“投资评级”是严格汇点（--rating-only，只影响说明文字）。
+    样本和版本（同 sample.scope）；target_only：研究范围是否另限目标有定义（--target-only / --rating-only，只影响说明文字）；
+    xv：目标的变量名和称呼（sample.XVars；下面的 RT、Rate、“投资评级”在 revenue 目标下换成 RV、Rev、营收类汇点）。
     返回 text_numbers.csv 的 DataFrame。
     “内容”一栏不写具体数字（数字在“数值”“显示”里），主窗口的变量名都由 sample.MAIN_H 派生；称呼样本研报的词取自样本登记的
     noun（hs300_deep 是“深度研报”，公司-券商层面 EVAL_IS_DEEP 一类数字的说明用它）。"""
     from src import samples
     from src.config import ROOT_DIR
     from src.graph.load import read_table
-    from src.measure.variables import RATING_NODE
     G = Reg(reg)
+    X6, LABEL, PAIRS, p, sm, tx = xv.X6, xv.label, pair_specs(xv), xv.pre, xv.sym, xv.text
+    # has：有目标对应的子图变量（--target none 时没有，只描述它们的行不输出）；F、fp、fs：逐一报告稳健性数字的三个变量及其
+    # 列名前缀、符号前缀（有目标时就是 X6[:3]、p、sm，none 时是 WG 三个、WG、All）
+    has, F, fp, fs = bool(xv.XT), xv.focus, xv.fpre, xv.fsym
+    nx = '六' if has else '三'  # 说明文字里逻辑结构变量的个数
     companies = samples.spec(sample)['companies']
     noun = samples.spec(sample).get('noun', '研报')
-    rating_rule = '，且 measure 的 RATING_STRICT_SINK 为真（--rating-only：“投资评级”是严格汇点）' if rating_only else ''
+    flag = '--rating-only' if xv.target == 'rating' else f'--target {xv.target} --target-only'
+    rating_rule = f'，且 measure 的 {xv.defined} 为真（{flag}：{tx["rule"]}）' if target_only else ''
     rows = []
     Hm = f'H{MAIN_H}'
 
@@ -371,7 +432,7 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
     rid = list(S.report_id)
     n_est = len(est)
     base = G.cell('report', 'fe_steps', Y_MAIN, 'firm+broker', 'WG_NSRC')
-    rate = G.cell('report', 'fe_steps', Y_MAIN, 'firm+broker', 'RT_NSRC')
+    rate = G.cell('report', 'fe_steps', Y_MAIN, 'firm+broker', f'{p}_NSRC') if has else None
     add('1.1', '样本研报篇数（研究范围）', len(S), 0,
         (f'研究范围：公司在覆盖名单（{companies.relative_to(ROOT_DIR).as_posix()}）里、graph 研报表 n_edges > 0 的研报篇数' if companies
          else f'研究范围：样本 {sample} 里 graph 研报表 n_edges > 0 的研报篇数') + rating_rule)
@@ -383,19 +444,30 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
     for T, g in est.groupby('RPT_YR_T'):
         add('1.1（对照，非文档数字）', f'基准回归样本中 T = {int(T)}（{Hm} 目标年度 {int(T) + MAIN_H}）的篇数', len(g), 0,
             f'基准回归估计样本中 RPT_YR_T = {int(T)} 的篇数')
-    C = read_table('concepts', sample, report_ids=rid, columns=['name'], version=version)
-    n_has = C[C.name == RATING_NODE].report_id.nunique()
-    add('1.2', '抽取出“投资评级”概念的研报篇数', n_has, 0,
-        f'graph 概念表（src.graph.load.read_table("concepts")，按样本清单从各版本的库里取，含没有进图边的孤立概念）中 name == “投资评级” 的研报数（研究范围 {len(S)} 篇内）')
-    add('1.2', '抽取出“投资评级”概念的研报占研究范围的比例（%）', n_has / len(S) * 100, 0, '上一行 ÷ 研究范围篇数 × 100')
+    if has:
+        C = read_table('concepts', sample, report_ids=rid, columns=['name'], version=version)
+        n_has = C[[bool(xv.match(n)) for n in C.name]].report_id.nunique()
+        add('1.2', f'抽取出{tx["concept"]}概念的研报篇数', n_has, 0,
+            f'graph 概念表（src.graph.load.read_table("concepts")，按样本清单从各版本的库里取，含没有进图边的孤立概念）中 {tx["match"]} 的研报数（研究范围 {len(S)} 篇内）')
+        add('1.2', f'抽取出{tx["concept"]}概念的研报占研究范围的比例（%）', n_has / len(S) * 100, 0, '上一行 ÷ 研究范围篇数 × 100')
     for name, key, nd, val in (('全文', '全文', 0, 'NSRC'), ('全文', '全文', 0, 'N_SINKS'), ('全文', '全文', 0, 'N_PATHS'), ('全文', '全文', 1, 'PATHLEN'),
-                               ('投资评级', '投资评级', 0, 'NSRC'), ('投资评级', '投资评级', 0, 'N_PATHS'), ('投资评级', '投资评级', 1, 'PATHLEN')):
+                               (xv.short, xv.short, 0, 'NSRC'), (xv.short, xv.short, 0, 'N_PATHS'), (xv.short, xv.short, 1, 'PATHLEN')):
+        if key not in schematic:  # --target none：图 1 只有全文
+            continue
         lab = {'NSRC': '源点数', 'N_SINKS': '汇点数', 'N_PATHS': '路径数', 'PATHLEN': '平均路径长度'}[val]
         v = schematic[key]['N_SINKS'] if val == 'N_SINKS' else schematic[key][val]
         add('1.2 图 1 的例子', f'{name}逻辑结构的{lab}', v, nd, '图 1 虚构小图上 src.measure.variables.graph_measures 的结果（汇点数 = 严格汇点个数）')
-    add('1.2', '“投资评级”是汇点的研报篇数', int(S.RT_NSRC.notna().sum()), 0, '研究范围中 measure 的 RT_NSRC 非缺失（投资评级是严格汇点）的篇数')
-    add('1.2', '基准回归中 RT 各列的篇数', rate.n, 0, f'reg_all report / fe_steps / {Y_MAIN} / firm+broker / RT_* 的 n')
-    add('1.2', '基准回归中 RT 各列的公司数', rate.n_clusters, 0, '同上的 n_clusters')
+    if has:
+        add('1.2', tx['sink_item'], int(S[f'{p}_NSRC'].notna().sum()), 0, f'研究范围中 measure 的 {p}_NSRC 非缺失（{tx["sink_how"]}）的篇数')
+        add('1.2', f'基准回归中 {p} 各列的篇数', rate.n, 0, f'reg_all report / fe_steps / {Y_MAIN} / firm+broker / {p}_* 的 n')
+        add('1.2', f'基准回归中 {p} 各列的公司数', rate.n_clusters, 0, '同上的 n_clusters')
+    if xv.count:  # 目标节点可以不止一个（revenue）：研究范围内每篇的个数（rating 不加这些行）
+        k = S[xv.count].astype(int)
+        add('1.2', f'研究范围内{xv.short}的总个数', k.sum(), 0, f'研究范围中 measure 的 {xv.count} 之和')
+        add('1.2', f'研究范围内平均每篇的{xv.short}个数', k.mean(), 2, f'研究范围中 {xv.count} 的均值')
+        for v, n in k.value_counts().sort_index().items():
+            add('1.2', f'{xv.short}个数为 {v} 的研报篇数', n, 0, f'研究范围中 {xv.count} == {v} 的篇数')
+        add('1.2', f'{xv.short}个数为 1 的研报占比（%）', (k == 1).mean() * 100, 0, f'研究范围中 {xv.count} == 1 的篇数 ÷ 研究范围篇数 × 100')
 
     # ---- 1.3 窗口与财年、同行条数
     for T, g in D.groupby('RPT_YR_T'):
@@ -428,29 +500,32 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
     # ---- 2.1 描述性统计（表 3）
     ds = desc.set_index(['变量', '口径'])
     ws = lambda x, k: ds.loc[(x, '缩尾后'), k]  # noqa: E731
-    add('表 3 注', 'RT 各行的研报篇数', ws('RT_NSRC', 'N'), 0, 'descriptive_stats.csv RT_NSRC（缩尾后）的 N：基准回归 RT_NSRC 那一列的估计样本')
+    if has:
+        add('表 3 注', f'{p} 各行的研报篇数', ws(f'{p}_NSRC', 'N'), 0, f'descriptive_stats.csv {p}_NSRC（缩尾后）的 N：基准回归 {p}_NSRC 那一列的估计样本')
     add('表 3 注', 'WG 各行的研报篇数', ws('WG_NSRC', 'N'), 0, 'descriptive_stats.csv WG_NSRC（缩尾后）的 N：基准回归 WG_NSRC 那一列的估计样本')
-    for x, unit, nd in (('RT_NSRC', '个', 0), ('WG_NSRC', '个', 0), ('RT_N_PATHS', '条', 0), ('WG_N_PATHS', '条', 0)):
-        add('2.1', f'{x} 的中位数（{unit}）', ws(x, '中位数'), nd, f'descriptive_stats.csv {x}（缩尾后）的中位数（= 表 3 中位数列）')
-    rt = estimation_sample(D, x='RT_NSRC')
-    add('2.1', '只有 1 个源点的研报占比（%）', (rt.RT_NSRC_RAW == 1).mean() * 100, 0,
-        f'基准回归 RT_NSRC 那一列的估计样本（{len(rt)} 篇）中 RT_NSRC_RAW（缩尾前）== 1 的占比 × 100')
-    for x in ('RT_PATHLEN', 'WG_PATHLEN'):
-        add('2.1', f'{x} 的中位数', ws(x, '中位数'), 2, f'descriptive_stats.csv {x}（缩尾后）的中位数（= 表 3 中位数列）')
+    for x, unit, nd in ((f'{p}_NSRC', '个', 0), ('WG_NSRC', '个', 0), (f'{p}_N_PATHS', '条', 0), ('WG_N_PATHS', '条', 0)):
+        if has or x.startswith('WG_'):
+            add('2.1', f'{x} 的中位数（{unit}）', ws(x, '中位数'), nd, f'descriptive_stats.csv {x}（缩尾后）的中位数（= 表 3 中位数列）')
+    rt = estimation_sample(D, x=f'{fp}_NSRC')
+    add('2.1', '只有 1 个源点的研报占比（%）', (rt[f'{fp}_NSRC_RAW'] == 1).mean() * 100, 0,
+        f'基准回归 {fp}_NSRC 那一列的估计样本（{len(rt)} 篇）中 {fp}_NSRC_RAW（缩尾前）== 1 的占比 × 100')
+    for x in (f'{p}_PATHLEN', 'WG_PATHLEN'):
+        if has or x.startswith('WG_'):
+            add('2.1', f'{x} 的中位数', ws(x, '中位数'), 2, f'descriptive_stats.csv {x}（缩尾后）的中位数（= 表 3 中位数列）')
 
     # ---- 2.2 方差分解（表 4）
     d3 = dec.set_index(['variable', 'spec']).adj_r2 * 100
-    add('2.2', '月份固定效应调整 R² 的最大值（%）', max(d3[(x, 'month')] for x in X6), 1, '表 4 第 (1) 列六个变量的最大值')
+    add('2.2', '月份固定效应调整 R² 的最大值（%）', max(d3[(x, 'month')] for x in X6), 1, f'表 4 第 (1) 列{nx}个变量的最大值')
     for spec, lab in (('firm', '公司'), ('broker', '券商'), ('firm+broker', '公司 + 券商')):
-        vals = [d3[(x, spec)] for x in X6[:3]]
-        add('2.2', f'RT 三个变量{lab}固定效应的调整 R² 下限', min(vals), 1, f'表 4 {lab} 列 RT 三行的最小值')
-        add('2.2', f'RT 三个变量{lab}固定效应的调整 R² 上限', max(vals), 1, f'表 4 {lab} 列 RT 三行的最大值')
+        vals = [d3[(x, spec)] for x in F]
+        add('2.2', f'{fp} 三个变量{lab}固定效应的调整 R² 下限', min(vals), 1, f'表 4 {lab} 列 {fp} 三行的最小值')
+        add('2.2', f'{fp} 三个变量{lab}固定效应的调整 R² 上限', max(vals), 1, f'表 4 {lab} 列 {fp} 三行的最大值')
     add('2.2', 'AllSrc 公司 + 券商固定效应的调整 R²（%）', d3[('WG_NSRC', 'firm+broker')], 1, '表 4 AllSrc 第 (5) 列')
     add('2.2', 'AllPath 公司 + 券商固定效应的调整 R²（%）', d3[('WG_LNPATH', 'firm+broker')], 1, '表 4 AllPath 第 (5) 列')
     cx = est[X6].corr()
-    add('2.2', 'RateSrc 与 RatePath 的相关系数', cx.loc['RT_NSRC', 'RT_LNPATH'], 2,
-        f'基准回归估计样本（{n_est} 篇；缩尾后，两两非缺失，RT 变量非缺失 {int(est.RT_NSRC.notna().sum())} 篇）Pearson 相关')
-    add('2.2', 'RateSrc 与 RateLen 的相关系数', cx.loc['RT_NSRC', 'RT_PATHLEN'], 2, '同上')
+    add('2.2', f'{fs}Src 与 {fs}Path 的相关系数', cx.loc[f'{fp}_NSRC', f'{fp}_LNPATH'], 2,
+        f'基准回归估计样本（{n_est} 篇；缩尾后，两两非缺失，{fp} 变量非缺失 {int(est[f"{fp}_NSRC"].notna().sum())} 篇）Pearson 相关')
+    add('2.2', f'{fs}Src 与 {fs}Len 的相关系数', cx.loc[f'{fp}_NSRC', f'{fp}_PATHLEN'], 2, '同上')
 
     # ---- 图 2、2.3
     add('图 2 注', '样本研报篇数', rl.report_id.nunique(), 0, '图 2 的研报 = 基准回归估计样本')
@@ -463,19 +538,20 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
     add('2.3', 'PeerLag 中位数（天）', rl.LAG_MEAN.median(), 1, f'{len(rl)} 篇 PeerLag（缩尾前）的中位数')
     add('2.3', 'PeerLag 下四分位（天）', rl.LAG_MEAN.quantile(.25), 1, f'{len(rl)} 篇 PeerLag（缩尾前）的 25% 分位')
     add('2.3', 'PeerLag 上四分位（天）', rl.LAG_MEAN.quantile(.75), 1, f'{len(rl)} 篇 PeerLag（缩尾前）的 75% 分位')
-    d = rl[['code', 'RT_NSRC', 'LAG_MEAN']].dropna()
-    r, p = corr_p(d.RT_NSRC.to_numpy(float), d.LAG_MEAN.to_numpy(float))
-    add('2.3', 'PeerLag 与 RateSrc 的相关系数', r, 2, f'{len(rl)} 篇中 RT_NSRC 非缺失的 {len(d)} 篇，两者缩尾前的 Pearson 相关（p = {p:.3f}）')
-    add('2.3', 'PeerLag 与 RateSrc 的相关系数的 p 值', p, 3, '上一行的双侧 p 值（t(n − 2)）')
+    xs = f'{fp}_NSRC'
+    d = rl[['code', xs, 'LAG_MEAN']].dropna()
+    r, pv = corr_p(d[xs].to_numpy(float), d.LAG_MEAN.to_numpy(float))
+    add('2.3', f'PeerLag 与 {fs}Src 的相关系数', r, 2, f'{len(rl)} 篇中 {xs} 非缺失的 {len(d)} 篇，两者缩尾前的 Pearson 相关（p = {pv:.3f}）')
+    add('2.3', f'PeerLag 与 {fs}Src 的相关系数的 p 值', pv, 3, '上一行的双侧 p 值（t(n − 2)）')
     d = d[d.groupby('code').code.transform('size') >= 2]
-    d = d.assign(**{c: d[c] - d.groupby('code')[c].transform('mean') for c in ('RT_NSRC', 'LAG_MEAN')})
-    r, p = corr_p(d.RT_NSRC.to_numpy(float), d.LAG_MEAN.to_numpy(float))
-    add('2.3', '按公司去均值后的相关系数', r, 2, f'同上，只留至少 2 篇的公司（{len(d)} 篇），按公司去均值后的 Pearson 相关（p = {p:.3f}）')
-    add('2.3', '按公司去均值后的相关系数的 p 值', p, 3, '上一行的双侧 p 值（t(n − 2)）')
+    d = d.assign(**{c: d[c] - d.groupby('code')[c].transform('mean') for c in (xs, 'LAG_MEAN')})
+    r, pv = corr_p(d[xs].to_numpy(float), d.LAG_MEAN.to_numpy(float))
+    add('2.3', '按公司去均值后的相关系数', r, 2, f'同上，只留至少 2 篇的公司（{len(d)} 篇），按公司去均值后的 Pearson 相关（p = {pv:.3f}）')
+    add('2.3', '按公司去均值后的相关系数的 p 值', pv, 3, '上一行的双侧 p 值（t(n − 2)）')
 
     # ---- 3.1、3.4
     add('3.1', 'PeerLag 的 t 值绝对值最大值',
-        max(abs(G.cell('report', 'fe_steps', Y_MAIN, 'firm+broker', x, LAG_MAIN).t) for x in X6), 2, '表 5 六列 PeerLag 的 |t| 最大值')
+        max(abs(G.cell('report', 'fe_steps', Y_MAIN, 'firm+broker', x, LAG_MAIN).t) for x in X6), 2, f'表 5 {nx}列 PeerLag 的 |t| 最大值')
     for i, h in enumerate(OTHER_H):
         q = G.q(level='report', block='fe_steps', Y=ymain(h), role='x')
         qf = q[q.fe.isin(['firm', 'firm+broker'])]
@@ -491,7 +567,7 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
                 ys = [yname(k, m, h) for m in METRICS for k in keys]
                 q = G.reg[(G.reg.level == 'report') & G.reg.block.isin(['fe_steps', 'definitions']) & G.reg.Y.isin(ys)
                           & (G.reg.fe == fe) & (G.reg.role == 'x')]
-                for grp, xs in (('RT', X6[:3]), ('WG', X6[3:])):
+                for grp, xs in ((p, xv.XT), ('WG', xv.XW)) if has else (('WG', xv.XW),):
                     qq = q[q.X.isin(xs)]
                     add(f'3.5（H{h}）', f'{fam} 族（{len(ys)} 个变量）{FE_LABEL[fe]} 下 {grp} 三个变量 10% 水平显著的格数', int((qq.p < 0.1).sum()), 0,
                         f'{"、".join(ys)} × {"、".join(xs)} 共 {len(qq)} 格（无结果的不计）中 p < 0.10 的个数')
@@ -502,7 +578,8 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
     pc = G.cell('firm_broker', 'fe_steps', Y_MAIN, 'firm+broker', 'WG_NSRC')
     add('3.6', '公司-券商层面观测数', pc.n, 0, f'reg_all firm_broker / fe_steps / {Y_MAIN} / firm+broker / WG_* 的 n')
     add('3.6', '公司-券商层面公司数', pc.n_clusters, 0, '同上的 n_clusters')
-    add('3.6', '公司-券商层面 RT 各列观测数', G.cell('firm_broker', 'fe_steps', Y_MAIN, 'firm+broker', 'RT_NSRC').n, 0, '同上 RT_* 的 n')
+    if has:
+        add('3.6', f'公司-券商层面 {p} 各列观测数', G.cell('firm_broker', 'fe_steps', Y_MAIN, 'firm+broker', f'{p}_NSRC').n, 0, f'同上 {p}_* 的 n')
     e = P[P[hv('EVAL_DT')].notna()]
     add('3.6', '样本对数', len(P), 0, '公司-券商层面样本对数')
     add('3.6', '有被评价预测的样本对数', len(e), 0, f'公司-券商层面样本（{len(P)} 对）中 {hv("EVAL_DT")} 非缺失的对数')
@@ -530,15 +607,15 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
 
     # ---- 第 4 节
     for fe in ('firm', 'firm+broker'):
-        for x in X6[:3]:
+        for x in F:
             cell2('4.1', f'去掉 PeerLag：{LABEL[x]}（{FE_ROW[fe]}）', 'no_peerlag', Y_MAIN, fe, x)
     for b in ('peerlag_median', 'peerlag_npeers'):
         for fe in ('firm', 'firm+broker'):
-            for x in X6[:3]:
+            for x in F:
                 cell2('4.1', f'{b}：{LABEL[x]}（{FE_ROW[fe]}）', b, Y_MAIN, fe, x)
     for fe in ('firm', 'firm+broker'):
-        cell2('4.1', f'peerlag_npeers：ln(n{MAIN_WIN})（{FE_ROW[fe]}，RateSrc 那一列）', 'peerlag_npeers', Y_MAIN, fe, 'RT_NSRC', LNN_MAIN)
-    for x in X6[:3]:
+        cell2('4.1', f'peerlag_npeers：ln(n{MAIN_WIN})（{FE_ROW[fe]}，{fs}Src 那一列）', 'peerlag_npeers', Y_MAIN, fe, f'{fp}_NSRC', LNN_MAIN)
+    for x in F:
         for fe in ('firm+month', 'firm+broker+month'):
             cell2('4.1', f'加月份固定效应：{LABEL[x]}（{fe}）', 'month_fe', Y_MAIN, fe, x)
     for spec in PAIRS:
@@ -546,22 +623,24 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
             for j in (0, 1):
                 x = spec.split('+')[j]
                 cell2('4.3', f'自算 PMAFE 下成对放入：{LABEL[x]}（{FE_ROW[fe]}）', 'paired', OWN_MAIN, fe, spec, x)
-    q = G.q(level='report', block='same_sample', Y=Y_MAIN, role='x')
-    add('4.4', 'WG 变量限 RT_NSRC 有定义的研报时 t 值绝对值最大值', q.t.abs().max(), 2, f'same_sample / {Y_MAIN} / 公司、公司 + 券商 × WG 三个的 |t| 最大值')
-    add('4.4', 'WG 变量限 RT_NSRC 有定义的研报时 10% 水平显著的格数', int((q.p < 0.1).sum()), 0, '同上 6 格中 p < 0.10 的个数')
+    if has:  # same_sample 块（--target none 时不估计）
+        q = G.q(level='report', block='same_sample', Y=Y_MAIN, role='x')
+        add('4.4', f'WG 变量限 {p}_NSRC 有定义的研报时 t 值绝对值最大值', q.t.abs().max(), 2, f'same_sample / {Y_MAIN} / 公司、公司 + 券商 × WG 三个的 |t| 最大值')
+        add('4.4', f'WG 变量限 {p}_NSRC 有定义的研报时 10% 水平显著的格数', int((q.p < 0.1).sum()), 0, '同上 6 格中 p < 0.10 的个数')
+        for fe in ('firm', 'firm+broker'):
+            for x in xv.XW:
+                cell2('4.4', f'WG 变量限 {p}_NSRC 有定义的研报：{LABEL[x]}（{FE_ROW[fe]}）', 'same_sample', Y_MAIN, fe, x)
+        add('4.4', '限定样本篇数', G.cell('report', 'same_sample', Y_MAIN, 'firm+broker', 'WG_NSRC').n, 0, f'same_sample / {Y_MAIN} / firm+broker 的 n')
     for fe in ('firm', 'firm+broker'):
-        for x in X6[3:]:
-            cell2('4.4', f'WG 变量限 RT_NSRC 有定义的研报：{LABEL[x]}（{FE_ROW[fe]}）', 'same_sample', Y_MAIN, fe, x)
-    add('4.4', '限定样本篇数', G.cell('report', 'same_sample', Y_MAIN, 'firm+broker', 'WG_NSRC').n, 0, f'same_sample / {Y_MAIN} / firm+broker 的 n')
-    for fe in ('firm', 'firm+broker'):
-        cell2('4.5', f'源点数取对数：RateSrc（{FE_ROW[fe]}）', 'log_sources', Y_MAIN, fe, 'RT_LNSRC')
-    for fe in ('firm', 'firm+broker'):
-        cell2('4.5', f'源点数取对数、与全文成对放入：RateSrc（{FE_ROW[fe]}）', 'log_sources', Y_MAIN, fe, 'RT_LNSRC+WG_LNSRC', 'RT_LNSRC')
+        cell2('4.5', f'源点数取对数：{fs}Src（{FE_ROW[fe]}）', 'log_sources', Y_MAIN, fe, f'{fp}_LNSRC')
+    if has:
+        for fe in ('firm', 'firm+broker'):
+            cell2('4.5', f'源点数取对数、与全文成对放入：{sm}Src（{FE_ROW[fe]}）', 'log_sources', Y_MAIN, fe, f'{p}_LNSRC+WG_LNSRC', f'{p}_LNSRC')
     lad = G.q(level='report', block='fe_steps', role='x')
     bc = lad[lad.fe.isin(['firm', 'firm+broker'])]
     ys = list(dict.fromkeys(lad.Y))
     add('4.6', '表 6、8 的系数个数', len(lad), 0,
-        f'fe_steps（{len(ys)} 个 Y：{"、".join(ys)} × 4 档固定效应 × 6 个变量；样本不足没有结果的不计）的 role = x 行数')
+        f'fe_steps（{len(ys)} 个 Y：{"、".join(ys)} × 4 档固定效应 × {len(X6)} 个变量；样本不足没有结果的不计）的 role = x 行数')
     add('4.6', '其中含公司固定效应的系数个数', len(bc), 0, '其中公司、公司 + 券商两档的行数')
     add('4.6', '无法估计（样本不足、没有结果）的格数', len(ys) * len(FE_ROW) * len(X6) - len(lad), 0,
         f'{len(ys)} 个 Y × {len(FE_ROW)} 档固定效应 × {len(X6)} 个变量 − 上面的系数个数')
@@ -570,10 +649,11 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
         'fe_steps 无、行业两档中 p < 0.10 的个数')
     dq = G.reg[(G.reg.level == 'report') & G.reg.block.isin(['fe_steps', 'definitions']) & (G.reg.role == 'x')
                & G.reg.fe.isin(['firm', 'firm+broker'])]
-    add('4.6', '数据文件全部定义（54 个 Y）含公司固定效应的系数个数', len(dq), 0, 'fe_steps、definitions 两块 × 公司、公司 + 券商 × 六个 X（无结果的不计）')
+    add('4.6', '数据文件全部定义（54 个 Y）含公司固定效应的系数个数', len(dq), 0, f'fe_steps、definitions 两块 × 公司、公司 + 券商 × {nx}个 X（无结果的不计）')
     add('4.6', '其中 10% 水平显著的个数', int((dq.p < 0.1).sum()), 0, '同上 p < 0.10 的个数')
-    add('4.6', '其中 RT 变量 10% 水平显著的个数', int((dq[dq.X.str.startswith('RT')].p < 0.1).sum()), 0, '同上 RT 三个变量中 p < 0.10 的个数')
-    add('4.6', '其中 RT 变量的系数个数', int(dq.X.str.startswith('RT').sum()), 0, '同上 RT 三个变量的格数')
+    if has:
+        add('4.6', f'其中 {p} 变量 10% 水平显著的个数', int((dq[dq.X.str.startswith(p)].p < 0.1).sum()), 0, f'同上 {p} 三个变量中 p < 0.10 的个数')
+        add('4.6', f'其中 {p} 变量的系数个数', int(dq.X.str.startswith(p).sum()), 0, f'同上 {p} 三个变量的格数')
     add('4.6', '其中 WG 变量 10% 水平显著的个数', int((dq[dq.X.str.startswith('WG')].p < 0.1).sum()), 0, '同上 WG 三个变量中 p < 0.10 的个数')
     fac = np.sqrt((bc.n - (bc.k - (bc.n_clusters - 1))) / (bc.n - bc.k))
     add('4.7', '不计嵌套的公司固定效应时 t 值增大的倍数（中位数）', float(np.median(fac)), 1,
@@ -583,12 +663,13 @@ def text_numbers(S, D, P, reg, desc, dec, est, pl, rl, schematic, sample=DEFAULT
         '研报层面样本中 code = 000858 的研报在目标年度 TY_Hh = 2025 的窗口上的 A_Hh ÷ 1e8（各篇、各窗口取到的值相同）')
     add('4.8', '五粮液 2024 年归母净利润（亿元）', actual_of(D, '000858', 2024) / 1e8, 1, '同上，目标年度 = 2024')
     for fe in ('firm', 'firm+broker'):
-        cell2('4.8', f'剔除五粮液：RateSrc（{FE_ROW[fe]}）', 'excl_000858', Y_MAIN, fe, 'RT_NSRC')
-    for fe in ('firm', 'firm+broker'):
-        cell2('4.8', f'剔除五粮液、与 AllSrc 成对放入：RateSrc（{FE_ROW[fe]}）', 'excl_000858', Y_MAIN, fe, 'RT_NSRC+WG_NSRC', 'RT_NSRC')
+        cell2('4.8', f'剔除五粮液：{fs}Src（{FE_ROW[fe]}）', 'excl_000858', Y_MAIN, fe, f'{fp}_NSRC')
+    if has:
+        for fe in ('firm', 'firm+broker'):
+            cell2('4.8', f'剔除五粮液、与 AllSrc 成对放入：{sm}Src（{FE_ROW[fe]}）', 'excl_000858', Y_MAIN, fe, f'{p}_NSRC+WG_NSRC', f'{p}_NSRC')
     for fe, lab in (('firmxyear', '公司 × 年度'), ('firmxyear+broker', '公司 × 年度 + 券商')):
-        for x in X6[:3]:
+        for x in F:
             cell2('4.9', f'{LABEL[x]}（{lab}）', 'firm_x_year', Y_MAIN, fe, x)
-        add('4.9', f'（{lab}）RT 各列的观测数', G.cell('report', 'firm_x_year', Y_MAIN, fe, 'RT_NSRC').n, 0,
-            f'reg_all report / firm_x_year / {Y_MAIN} / {fe} / RT_NSRC 的 n')
+        add('4.9', f'（{lab}）{fp} 各列的观测数', G.cell('report', 'firm_x_year', Y_MAIN, fe, f'{fp}_NSRC').n, 0,
+            f'reg_all report / firm_x_year / {Y_MAIN} / {fe} / {fp}_NSRC 的 n')
     return pd.DataFrame(rows)

@@ -11,6 +11,13 @@
   HAS_RATING_NODE           图里有没有“投资评级”节点（图只由进 DAG 的边构成：概念表里有“投资评级”、但它没有进图的边时
                             这里是 False，所以比按概念表数的篇数少）
   RATING_STRICT_SINK        “投资评级”是不是严格汇点（入度 > 0、出度 = 0）
+  RV_NSRC、RV_LNPATH、RV_PATHLEN、RV_N_PATHS   营收类汇点对应的逻辑结构（revenue 目标：T = 名称是营收类的严格汇点，规则见
+                            variables.py 的 REVENUE_PATTERN、REVENUE_EXCLUDE）的同样四个量；没有营收类汇点时缺失
+  N_REVENUE_SINKS           营收类汇点的个数（没有时为 0）
+  HAS_REVENUE_SINK          至少有一个营收类汇点
+  （RV_* 起的六列是 2026-11-25 追加在原有各列之后的，原有各列的值和行序不变。）
+目标（“目标节点集合及其全部上游”的一套变量，如 RT、RV）登记在 variables.py 的 TARGETS；以后加目标时在那里加一项，并在
+COLUMNS 末尾追加它的列（不插在中间，原有列和行序保持不变）。
 表里一切都是原始值：不缩尾、不标准化、不筛样本（这些依赖样本，是后面研究代码的事）。行序同库的研报表。
 
 在仓库根目录运行：
@@ -21,7 +28,8 @@ from src.config import DEFAULT_VERSION, measure_dir
 
 FILE = 'report_measures.parquet'
 COLUMNS = ['report_id', 'version', 'RT_NSRC', 'RT_LNPATH', 'RT_PATHLEN', 'WG_NSRC', 'WG_LNPATH', 'WG_PATHLEN',
-           'RT_N_PATHS', 'WG_N_PATHS', 'HAS_RATING_NODE', 'RATING_STRICT_SINK']
+           'RT_N_PATHS', 'WG_N_PATHS', 'HAS_RATING_NODE', 'RATING_STRICT_SINK',
+           'RV_NSRC', 'RV_LNPATH', 'RV_PATHLEN', 'RV_N_PATHS', 'N_REVENUE_SINKS', 'HAS_REVENUE_SINK']  # 新列只往后追加
 
 
 def out_path(version):
@@ -45,8 +53,9 @@ def measure_all(version=DEFAULT_VERSION):
     graphs = library_graphs(version)
     rows = [{'report_id': rid, 'version': version, **report_variables(g)} for rid, g in graphs.items()]
     out = pd.DataFrame(rows, columns=COLUMNS)
-    for c in ('RT_N_PATHS', 'WG_N_PATHS'):
+    for c in ('RT_N_PATHS', 'WG_N_PATHS', 'RV_N_PATHS'):
         out[c] = out[c].astype('Int64')
+    out['N_REVENUE_SINKS'] = out.N_REVENUE_SINKS.astype('int64')
     return out
 
 
@@ -63,4 +72,5 @@ def run(args):
     out.to_parquet(path, index=False)
     print(f'版本 {args.version} 的库：{len(out)} 篇研报，写到 {path}')
     print(f'图里有“投资评级”节点 {int(out.HAS_RATING_NODE.sum())} 篇，其中是严格汇点 {int(out.RATING_STRICT_SINK.sum())} 篇；'
+          f'有营收类汇点 {int(out.HAS_REVENUE_SINK.sum())} 篇（共 {int(out.N_REVENUE_SINKS.sum())} 个）；'
           f'全文变量有定义 {int(out.WG_NSRC.notna().sum())} 篇；用时 {time.time() - t0:.1f} 秒')

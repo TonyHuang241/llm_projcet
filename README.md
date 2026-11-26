@@ -84,11 +84,13 @@ output/
   studies/forecast_accuracy/hs300_deep_v1/        回归输出 + 文档（md、pdf、figures/）+ manifest.json
   studies/forecast_accuracy/hs300_deep_v1_log1p/  对数变量版，同样带自己的文档和 figures/
   studies/forecast_accuracy/hs300_full_v1_rating/ hs300_full 里“投资评级”是严格汇点的研报（--rating-only），带自己的文档和 figures/
+  studies/forecast_accuracy/hs300_full_v1_revenue/ hs300_full 里至少有一个营收类汇点的研报（--target revenue --target-only），带自己的文档和 figures/
+  studies/forecast_accuracy/hs300_full_v1_wg/ hs300_full 里图非空的全部研报，只放全文逻辑结构三个变量（--target none），带自己的文档和 figures/
   experiments/graph_stability/                同一批研报重复抽取的结果，用来衡量抽取噪声
   archive/docs/                               已不维护的旧文档
 ```
 
-研究输出目录名是 `<样本>_<版本>`（样本里个别研报取自别的版本时以清单为准，目录名用主版本），`--rating-only` 时加 `_rating`，`--log1p` 时再加 `_log1p`。每个研究输出目录和 accuracy 的样本目录里有 `manifest.json`：样本、版本、是否 log1p（给了 `--rating-only` 时另记 `rating_only: true`）、研报篇数、各版本篇数、生成时间。
+研究输出目录名是 `<样本>_<版本>`（样本里个别研报取自别的版本时以清单为准，目录名用主版本），`--target-only` 时加 `_<目标>`（`--rating-only` 即 `_rating`，`--target revenue --target-only` 是 `_revenue`），目标不是 rating 又没给 `--target-only` 时加 `_<目标>_all`，`--target none` 时加 `_wg`，`--log1p` 时再加 `_log1p`。每个研究输出目录和 accuracy 的样本目录里有 `manifest.json`：样本、版本、是否 log1p（给了 `--rating-only` 时另记 `rating_only: true`，目标不是 rating 时另记 `target`、`target_only`）、研报篇数、各版本篇数、生成时间。
 **git 只跟踪 `output/` 下的研究文档**（`output/studies/` 下的 md、pdf、`figures/` 里的图）和 `output/archive/` 下的全部；parquet、csv、cache 等其余结果不入 git（见 `.gitignore`）。
 
 ### 旧路径到新路径（2026-11-25）
@@ -123,10 +125,10 @@ output/
 | `python run.py unify [--version v1]` | 跨研报统一概念名称（可选） | `output/graph/<版本>/` | 同一目录 | 是 | — |
 | `python run.py measure [--version v1]` | 逻辑结构变量 | `output/graph/<版本>/` | `output/measure/<版本>/` | 否 | 3 秒 |
 | `python run.py accuracy [--sample hs300_deep]` | 预测准确度和控制变量 | 样本的研报表、`data/` 的预测表、行情、财务 | `output/accuracy/<样本>/` | 否 | 20 秒 |
-| `python run.py study forecast_accuracy [--sample hs300_deep] [--version v1] [--rating-only] [--log1p]` | 样本、描述性统计、方差分解、回归、文档的表和图（分环节，见下文） | graph、measure、accuracy 的成品、`data/`（含 `forecast_errors.parquet`） | `output/studies/forecast_accuracy/<样本>_<版本>[_rating][_log1p]/` | 否 | 1.5 分钟（hs300_full --rating-only 约 8 分钟，其中回归 5 分钟） |
+| `python run.py study forecast_accuracy [--sample hs300_deep] [--version v1] [--target rating\|revenue\|none] [--target-only \| --rating-only] [--log1p]` | 样本、描述性统计、方差分解、回归、文档的表和图（分环节，见下文） | graph、measure、accuracy 的成品、`data/`（含 `forecast_errors.parquet`） | `output/studies/forecast_accuracy/<样本>_<版本>[_<目标>[_all] 或 _wg][_log1p]/` | 否 | 1.5 分钟（hs300_full --rating-only 约 8 分钟，其中回归 5 分钟） |
 | `python run.py study forecast_accuracy --part pdf` | 文档 md 转 PDF | 输出目录里的 md 和 `figures/` | md 旁边同名 `.pdf` | 否 | 几秒 |
 | `python run.py study concept_coverage [--sample hs300_deep] [--concept 投资评级 --tag rating]` | 检查工具：多少篇研报抽到了某个概念、它在图里的位置（见下文） | graph 的成品 | `output/studies/concept_coverage/<样本>_<版本>/<tag>/` | 否 | 几秒 |
-| `python run.py study structure_distribution [--sample hs300_deep] [--rating-only]` | 检查工具：六个逻辑结构变量（原始值）的分布（见下文） | measure、graph 的成品 | `output/studies/structure_distribution/<样本>_<版本>[_rating]/` | 否 | 几秒 |
+| `python run.py study structure_distribution [--sample hs300_deep] [--target rating\|revenue] [--target-only \| --rating-only]` | 检查工具：六个逻辑结构变量（原始值）的分布（见下文） | measure、graph 的成品 | `output/studies/structure_distribution/<样本>_<版本>[_<目标>[_all]]/` | 否 | 几秒 |
 
 每个步骤的选项用 `python run.py <步骤> --help` 查看，各步骤的口径写在 `src/<步骤>/` 各文件开头。
 只想重现文档里的数字时，依次运行 `measure`（`--version v1`、`--version v0` 各一次）、`accuracy`、`study` 即可，不需要重新清理文本和抽取。
@@ -216,9 +218,11 @@ v1 库的名称统一没有做完：合并提议 7036 组已做完，复核做�
 对一个版本的库里的全部研报各算一行（v1 17956 篇——2026-11-25 抽完 hs300_full 后重算，原有 979 篇的值逐位不变；v0 65 篇），写 `output/measure/<版本>/report_measures.parquet`；按样本读用 `src/measure/load.py` 的 `read_measures`（默认 `hs300_deep` 的 1019 篇）。口径见 `src/measure/variables.py`。
 
 - 源点：没有入边的概念；严格汇点：有入边、没有出边的概念；路径：从源点到汇点的有向路径。
-- 两套变量各三个：源点数、ln(1 + 路径数)、平均路径长度。
+- 每套变量三个：源点数、ln(1 + 路径数)、平均路径长度。
   - 全文逻辑结构（`WG_*`）：整张图。
-  - “投资评级”对应的逻辑结构（`RT_*`）：“投资评级”节点及其全部上游，只在它是严格汇点时有定义。
+  - “目标”对应的逻辑结构：目标节点集合 T 及其全部上游，T 为空时缺失。目标登记在 `src/measure/variables.py` 的 `TARGETS`（列名前缀、文档符号、中文名、取 T 的函数），以后加目标只加一项、在表的末尾追加列：
+    - `rating`（`RT_*`，RateSrc 等）：T = {“投资评级”}，只在它是严格汇点时有定义（标记列 `HAS_RATING_NODE`、`RATING_STRICT_SINK`）。
+    - `revenue`（`RV_*`，RevSrc 等；2026-11-25 追加在原有列之后，原有列逐值不变）：T = 名称匹配 `收入|营收`、不匹配 `成本收入比|可支配收入|居民收入|财政收入` 的严格汇点（有出边的营收类节点不算），另有 `RV_N_PATHS`、`N_REVENUE_SINKS`（个数，没有时为 0）、`HAS_REVENUE_SINK`。hs300_full 里 9037 篇（50.9%）有营收类汇点。
 
 ### accuracy：预测准确度和控制变量
 
@@ -253,6 +257,10 @@ v1 库的名称统一没有做完：合并提议 7036 组已做完，复核做�
 
 `--rating-only` 把研究范围再限定在“投资评级”是严格汇点（入度 > 0、出度 = 0，measure 的 `RATING_STRICT_SINK`）的研报，`RT_*` 三个变量在范围内全部有定义；之后的基础样本、券商分组、缩尾、标准化、公司-券商层面的样本对都在这个范围内照原规则做。它同样只在 `sample` 环节起作用，输出目录名加 `_rating`（和 `--log1p` 同时给时是 `_rating_log1p`），单独跑其他环节时也要带上。不给时行为和以前完全相同。现有的一份是 `python run.py study forecast_accuracy --sample hs300_full --rating-only`：hs300_full 里 8468 篇（47.7%）的“投资评级”是严格汇点，另一半研报的“投资评级”没有连进图（原因未查），这份结果不能外推到全部研报。行业表里没有、也不在 `MANUAL_INDUSTRY` 里的公司（hs300_full 里只有 601059 信达证券）行业记缺失，只在含行业固定效应的回归和方差分解的“行业”一列里不用。
 
+`--target {rating,revenue}`（默认 rating）决定“目标对应的逻辑结构”三个变量用 `RT_*` 还是 `RV_*`（全文的 `WG_*` 不变），列名、表头、正文数字的说明和图 1 的 (b) 面板都跟着换；`--target-only` 把范围限定在该目标有定义的研报，`--rating-only` 等于 `--target rating --target-only`。和 `--log1p` 一样只在 `sample` 环节起作用，单独跑其他环节时也要带上。不带这两个开关时输出与以前逐字节相同。现有的一份是 `python run.py study forecast_accuracy --sample hs300_full --target revenue --target-only`（输出在 `hs300_full_v1_revenue/`，另有 `tables/target_nodes.csv`：营收类汇点名称的频数）：营收类节点是汇点说明图里没有抽到它往下（到利润、估值）的边，可能是原文如此，也可能是漏抽，未核查，结论同样不能外推到全部研报。
+
+`--target none` 不用任何目标对应的子图变量，逻辑结构变量只有全文的 `WG_*` 三个（AllSrc、AllPath、AllLen）；研究范围就是原规则（图非空、名单内），不做目标筛选，不能和 `--target-only`、`--rating-only` 同时给。输出目录加 `_wg`，manifest 记 `target: none`。需要子图变量的回归块（成对放入 `paired`、`firm_broker:paired`，`same_sample`）不估计，表 7、13 不输出，图 1 只画全文一个面板；其余照旧。现有的一份是 `python run.py study forecast_accuracy --sample hs300_full --target none`（输出在 `hs300_full_v1_wg/`，文档的表号：标准版表 8–12 依次成为表 7–11）。
+
 主要输出：
 
 - `sample_report.parquet`、`sample_pair.parquet`：两个层面的回归样本。
@@ -268,7 +276,7 @@ v1 库的名称统一没有做完：合并提议 7036 组已做完，复核做�
 
 ### study structure_distribution：逻辑结构变量的分布（独立工具）
 
-统计回归用的六个逻辑结构变量（RT_NSRC、RT_LNPATH、RT_PATHLEN、WG_NSRC、WG_LNPATH、WG_PATHLEN）、两个路径条数和 `--log1p` 用的四个对数变换列的分布（分位数、偏度、峰度、取最小值的占比等），四个整数变量的频数表，按正文字数分组的均值和中位数，以及原始值和对数变换后的直方图，用来判断偏态和取对数是否合适。统计的是 measure 的原始值（不缩尾、不标准化），每个变量在它有定义的研报上统计；默认范围是样本里库中有结果的全部研报，`--rating-only` 只看“投资评级”是严格汇点的研报（不套公司名单，所以可能比 forecast_accuracy 同名开关的范围大）。只读 measure 和 graph 的成品，不调用大模型，不在主流程里，也不被其他步骤调用，每次覆盖自己的输出。例：`python run.py study structure_distribution --sample hs300_full --rating-only`。输出在 `output/studies/structure_distribution/<样本>_<版本>[_rating]/`（`summary.md`、`summary.csv`、`frequency.csv`、`by_length.csv`、`histograms.png`、`histograms_log1p.png`、`manifest.json`），口径和各文件见 `src/studies/structure_distribution/__init__.py` 开头。
+统计回归用的六个逻辑结构变量（RT_NSRC、RT_LNPATH、RT_PATHLEN、WG_NSRC、WG_LNPATH、WG_PATHLEN）、两个路径条数和 `--log1p` 用的四个对数变换列的分布（分位数、偏度、峰度、取最小值的占比等），四个整数变量的频数表，按正文字数分组的均值和中位数，以及原始值和对数变换后的直方图，用来判断偏态和取对数是否合适。统计的是 measure 的原始值（不缩尾、不标准化），每个变量在它有定义的研报上统计；默认范围是样本里库中有结果的全部研报，`--rating-only` 只看“投资评级”是严格汇点的研报（不套公司名单，所以可能比 forecast_accuracy 同名开关的范围大）；`--target revenue` 把 RT 三个变量换成 RV 三个，`--target-only` 只看该目标有定义的研报（同 forecast_accuracy）。只读 measure 和 graph 的成品，不调用大模型，不在主流程里，也不被其他步骤调用，每次覆盖自己的输出。例：`python run.py study structure_distribution --sample hs300_full --rating-only`。输出在 `output/studies/structure_distribution/<样本>_<版本>[_<目标>[_all]]/`（`summary.md`、`summary.csv`、`frequency.csv`、`by_length.csv`、`histograms.png`、`histograms_log1p.png`、`manifest.json`），口径和各文件见 `src/studies/structure_distribution/__init__.py` 开头。
 
 ## 数据
 

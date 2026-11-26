@@ -13,6 +13,27 @@ rating_only: true，不给时不写这一项，manifest 与加这个开关之前
 它在 sample 环节决定范围，其他环节读同一个输出目录：单独跑某个环节时也要带上 --rating-only（或同一个 --output）。
 不给时行为与加这个开关之前完全相同。
 
+目标开关 --target {rating,revenue}（默认 rating）和 --target-only：--target 决定“目标对应的逻辑结构”三个变量用哪一套
+（rating：RT_*，“投资评级”，文档符号 RateSrc、RatePath、RateLen；revenue：RV_*，营收类汇点，RevSrc、RevPath、RevLen；
+目标的定义和登记表见 src/measure/variables.py 的 TARGETS），全文的 WG_* 三个不变；列名、表头、正文数字的说明、图 1 的 (b)
+面板都跟着换（sample.XVars）。--target-only 把研究范围在原规则之后再限定在该目标的三个变量有定义的研报；--rating-only 保留，
+等于 --target rating --target-only。都只在 sample 环节决定范围和变量，其他环节读同一个输出目录，单独跑环节时也要带上。
+输出目录后缀：--target-only 时加 _<目标>（rating 仍是 _rating）；目标不是 rating 又没给 --target-only 时加 _<目标>_all；
+之后再接 _log1p。manifest 在目标不是 rating 时另记 target、target_only；默认目标下只读入 RT_* 和 rating 的标记列，
+不带新开关时各环节写出的文件与加这个开关之前逐字节相同。
+
+不用子图变量 --target none（NO_TARGET；研究层的设定，不在 measure 的 TARGETS 里）：逻辑结构变量只有全文的 WG_* 三个
+（AllSrc、AllPath、AllLen），不读入任何目标的列。研究范围就是原规则（n_edges > 0、名单内），不做目标筛选；和 --target-only、
+--rating-only 同时给时报错。输出目录后缀 _wg（之后可接 _log1p），manifest 记 target: none、target_only: false。
+样本、缩尾、标准化、控制变量、固定效应、公司-券商层面的规则都照旧，只是 X 只有三个（sample.XVars('none')）。各环节：
+    regress   需要子图变量的块不估计：paired、same_sample、firm_broker:paired；log_sources 只有 WG_LNSRC 单独放入（没有成对）；
+              excl_000858 的“全部同时放入”是三个 WG 同时放入；其余块照常，只对三个 WG 变量做（--blocks 也不接受这三块）
+    tables    表 7、表 13 不输出；表 3–6、8–12 只有三个变量的行 / 列，N 一列只有一个数；text_numbers 里只描述子图变量的行
+              （概念篇数、汇点篇数、子图各列的篇数和中位数、成对放入、same_sample 等）不输出；原来对子图三个变量逐一报告的
+              稳健性数字（2.2 的分解区间和相关、2.3 PeerLag 的相关、第 4 节的 4.1、4.5、4.8、4.9）改为对 WG 三个变量报告
+    figures   图 1 只画全文逻辑结构一个面板
+文档（hs300_full_v1_wg/研报逻辑结构与分析师预测准确度.md）的表号：标准版表 1–6 不变，表 8–12 依次成为表 7–11，表 7、13 没有。
+
 输入：上游步骤的成品（先跑 python run.py measure --version <版本>、python run.py accuracy --sample <样本>）src.graph.load、
 src.measure.load、src.accuracy.load，样本登记的公司名单（hs300_deep 是 data/hs300_2024_dag_covered.csv）、data/market_data/industry.xlsx，以及外部的预测误差文件 data/forecast_errors.parquet（被解释变量，
 见 errors.py；describe 环节的中位数核对另读 data/EST_COMP_TN）。样本、缩尾、回归设定的口径见 sample.py、errors.py、regressions.py
@@ -33,7 +54,8 @@ src.measure.load、src.accuracy.load，样本登记的公司名单（hs300_deep 
                                               和 data/EST_COMP_TN）                          tables/consistency_fields.csv、tables/table3_descriptive.csv
     decomp    固定效应分解（表 4）            sample_report.parquet                          variance_decomposition.csv、tables/table4_fe_decomposition.csv
     regress   全部回归                        sample_report.parquet、sample_pair.parquet    reg_all.csv
-    tables    回归表（表 5–13）和正文数字     reg_all.csv、descriptive_stats.csv、           tables/table5_…–table13_….csv、tables/text_numbers.csv
+    tables    回归表（表 5–13）和正文数字     reg_all.csv、descriptive_stats.csv、           tables/table5_…–table13_….csv、tables/text_numbers.csv；
+                                                                                             revenue 目标另写 tables/target_nodes.csv（营收类汇点名称频数）
                                               variance_decomposition.csv、scope.parquet、
                                               两个 sample_*、两个 figure2_*（另读 graph 的概念表）
     figures   图 1、图 2                      figure2_*.parquet                              figures/ 下两张 png（--fig-dir 可改）
@@ -55,8 +77,14 @@ regressions.read_reg），所以分环节运行和一次跑完的结果完全相
     python run.py study forecast_accuracy --sample hs300_full --rating-only
                                                                     只研究“投资评级”是严格汇点的研报，输出在 hs300_full_v1_rating/
                                                                     （共约 8 分钟，回归约 5 分钟）；单独跑其他环节时也要带上 --rating-only
+    python run.py study forecast_accuracy --sample hs300_full --target revenue --target-only
+                                                                    目标换成营收类汇点，只研究至少有一个营收类汇点的研报，输出在
+                                                                    hs300_full_v1_revenue/；单独跑其他环节时也要带上这两个开关
+    python run.py study forecast_accuracy --sample hs300_full --target none
+                                                                    不用子图变量，只放全文逻辑结构三个变量，范围是全部图非空的研报，
+                                                                    输出在 hs300_full_v1_wg/；单独跑其他环节时也要带上 --target none
 
-输出在 output/studies/forecast_accuracy/<样本>_<版本>[_rating][_log1p]/（下面的篇数是 hs300_deep_v1 的）：
+输出在 output/studies/forecast_accuracy/<样本>_<版本>[_<目标>[_all] 或 _wg][_log1p]/（下面的篇数是 hs300_deep_v1 的）：
     scope.parquet                研究范围 791 篇（合并了 accuracy 的全部列和 measure 的原始值）           sample.scope
     sample_report.parquet        研报层面回归样本（786 篇基础样本；<变量>_RAW 为缩尾前的值）             sample.report_sample
     sample_pair.parquet          公司-券商层面回归样本（760 对）                                         sample.pair_sample
@@ -73,7 +101,8 @@ regressions.read_reg），所以分环节运行和一次跑完的结果完全相
     figures/                     图 1、图 2（文档 md 用相对路径 figures/ 引用）                          figures.schematic、peer_lag_plot
     研报逻辑结构与分析师预测准确度.md、.pdf   文档和 PDF（对数变量版的目录里是 …_对数变量.md）           人工撰写；src.mdpdf
     <md 文件名>.html             pdf 环节的中间 HTML                                                     src.mdpdf
-    manifest.json                这份输出用的样本、版本、是否 log1p（--rating-only 时另记 rating_only）、  stage_sample
+    manifest.json                这份输出用的样本、版本、是否 log1p（--rating-only 时另记 rating_only；     stage_sample
+                                 目标不是 rating 时另记 target、target_only）、
                                  篇数、各版本篇数、生成时间
 
 文档的表 / 图 / 节 -> 输出文件 -> 生成它的函数
@@ -106,6 +135,7 @@ regressions.read_reg），所以分环节运行和一次跑完的结果完全相
 from src.config import DEFAULT_SAMPLE, study_dir
 
 STUDY = 'forecast_accuracy'
+NO_TARGET = 'none'  # --target none：不用任何目标对应的子图变量，只有全文的 WG_* 三个（研究层的设定，不在 measure 的 TARGETS 里）
 DOC = '研报逻辑结构与分析师预测准确度.md'  # pdf 环节默认转换的文档（在输出目录里）
 DOC_LOG1P = '研报逻辑结构与分析师预测准确度_对数变量.md'  # --log1p 时的默认文档
 STAGES = ('sample', 'describe', 'decomp', 'regress', 'tables', 'figures', 'pdf')  # 执行顺序
@@ -124,19 +154,49 @@ def add_args(ap):
     ap.add_argument('--version', default=None,
                     help='逻辑结构取自哪个抽取版本；默认样本的主版本（照清单，个别研报可以取自别的版本），给别的版本时样本的全部研报都取自它')
     ap.add_argument('--output', default=None,
-                    help='输出目录，默认 output/studies/forecast_accuracy/<样本>_<版本>/（--rating-only 时加 _rating，--log1p 时再加 _log1p）')
+                    help='输出目录，默认 output/studies/forecast_accuracy/<样本>_<版本>/（--target-only 时加 _<目标>，'
+                         '目标不是 rating 又没给 --target-only 时加 _<目标>_all，--target none 时加 _wg，--log1p 时再加 _log1p）')
     ap.add_argument('--log1p', action='store_true', help='六个逻辑结构变量都取 ln(1 + x)（源点数、平均路径长度取 log1p，路径数不变）')
     ap.add_argument('--rating-only', action='store_true',
                     help='研究范围再限定在“投资评级”是严格汇点的研报（measure 的 RATING_STRICT_SINK），之后照原规则做；'
-                         '只在 sample 环节起作用，单独跑其他环节时也要带上（决定输出目录）')
+                         '只在 sample 环节起作用，单独跑其他环节时也要带上（决定输出目录）；等于 --target rating --target-only')
+    from src.measure.variables import DEFAULT_TARGET, TARGETS
+    ap.add_argument('--target', default=DEFAULT_TARGET, choices=list(TARGETS) + [NO_TARGET],
+                    help=f'目标对应的逻辑结构用哪一套（src/measure/variables.py 的 TARGETS），默认 {DEFAULT_TARGET}；'
+                         '全文的三个变量不变；none 表示不用子图变量、只放全文三个变量（输出目录加 _wg）；'
+                         '单独跑其他环节时也要带上（决定输出目录和列名）')
+    ap.add_argument('--target-only', action='store_true',
+                    help='研究范围再限定在该目标的三个变量有定义的研报，之后照原规则做；单独跑其他环节时也要带上')
     ap.add_argument('--fig-dir', default=None, help='图的目录，默认 <输出目录>/figures/')
     ap.add_argument('--doc', default=None, help=f'pdf 环节要转换的 md，默认 <输出目录>/{DOC}（--log1p 时 {DOC_LOG1P}）；PDF 写在 md 旁边、同名')
 
 
-def default_out(sample, version, log1p, rating_only=False):
-    """默认输出目录：output/studies/forecast_accuracy/<样本>_<版本>[_rating][_log1p]/；version 为 None 时用样本的主版本。"""
+def target_suffix(target='rating', target_only=False):
+    """输出目录名里目标的后缀：--target-only 时 _<目标>（rating 是 _rating）；目标不是 rating 又没给 --target-only 时
+    _<目标>_all；默认（rating、不限定）为空；--target none（不用子图变量）为 _wg。structure_distribution 也用它。"""
+    from src.measure.variables import DEFAULT_TARGET
+    if target == NO_TARGET:
+        return '_wg'
+    return f'_{target}' if target_only else f'_{target}_all' if target != DEFAULT_TARGET else ''
+
+
+def resolve_target(args):
+    """--rating-only 等于 --target rating --target-only：把它并进 args.target、args.target_only（就地改，返回 args）。
+    --target none 不能和 --target-only、--rating-only 同时给。"""
+    if getattr(args, 'rating_only', False):
+        if args.target != 'rating':
+            raise SystemExit(f'--rating-only 等于 --target rating --target-only，不能和 --target {args.target} 同时给')
+        args.target_only = True
+    if args.target == NO_TARGET and args.target_only:
+        raise SystemExit('--target none 不用任何子图变量，研究范围不做目标筛选，不能和 --target-only 同时给')
+    return args
+
+
+def default_out(sample, version, log1p, target='rating', target_only=False):
+    """默认输出目录：output/studies/forecast_accuracy/<样本>_<版本>[_<目标>[_all]][_log1p]/（后缀见 target_suffix）；
+    version 为 None 时用样本的主版本。"""
     from src import samples
-    suffix = ('_rating' if rating_only else '') + ('_log1p' if log1p else '')
+    suffix = target_suffix(target, target_only) + ('_log1p' if log1p else '')
     return study_dir(STUDY, sample, version or samples.main_version(sample), suffix)
 
 
@@ -155,11 +215,15 @@ class Ctx:
     """一次运行的参数：输出目录、图目录、--blocks 解析出的块，以及读前面环节成品的工具。"""
 
     def __init__(self, args, out, fig_dir, only):
+        from src.studies.forecast_accuracy.sample import XVars
         self.args, self.out, self.fig_dir, self.only = args, out, fig_dir, only
         self.src = dict(sample=args.sample, version=args.version)  # 读上游成品用的样本和版本
+        self.xv = XVars(args.target)  # 目标的变量名和称呼
+        rating = args.target == 'rating'
         self.hint = ((f' --sample {args.sample}' if args.sample != DEFAULT_SAMPLE else '')
                      + (f' --version {args.version}' if args.version else '')
-                     + (' --rating-only' if args.rating_only else '')
+                     + ('' if rating else f' --target {args.target}')
+                     + ((' --rating-only' if rating else ' --target-only') if args.target_only else '')
                      + (' --log1p' if args.log1p else '') + (f' --output {args.output}' if args.output else ''))
 
     def load(self, name, stage):
@@ -190,14 +254,18 @@ def stage_sample(c):
     from src import samples
     from src.graph.load import owners
     from src.studies.forecast_accuracy import figures, regressions, sample
-    S, D, P, R = sample.build(c.args.log1p, **c.src, rating_only=c.args.rating_only)
-    pl, rl = figures.peer_lag_frames(regressions.estimation_sample(D), c.args.sample)
-    print(f'  研究范围 {len(S)} 篇' + ('（--rating-only：“投资评级”是严格汇点）' if c.args.rating_only else '')
+    S, D, P, R = sample.build(c.args.log1p, **c.src, target_only=c.args.target_only, target=c.args.target)
+    pl, rl = figures.peer_lag_frames(regressions.estimation_sample(D), c.args.sample, c.xv.pre)  # none 时 pre 为 None
+    print(f'  研究范围 {len(S)} 篇' + (f'（--target-only：{c.xv.text["rule"]}）' if c.args.target_only else '')
           + f'；研报层面样本 {len(D)} 篇，公司-券商层面样本 {len(P)} 对；数据文件 {len(R)} 行；'
           f'图 2：{len(rl)} 篇、{len(pl)} 条同行预测')
     owner = owners(**c.src)
     vs = [owner[r] for r in S.report_id]
-    extra = dict(rating_only=True) if c.args.rating_only else {}  # 不给开关时不写这一项，manifest 与原来相同
+    # 不给开关时不写这几项，manifest 与原来相同；rating 目标只记 rating_only（--target rating --target-only 与 --rating-only 相同）
+    if c.args.target == 'rating':
+        extra = dict(rating_only=True) if c.args.target_only else {}
+    else:
+        extra = dict(target=c.args.target, target_only=bool(c.args.target_only))
     samples.write_manifest(
         c.out, study=STUDY, sample=c.args.sample, version=c.args.version or samples.main_version(c.args.sample),
         version_rule='照样本清单' if c.args.version in (None, samples.main_version(c.args.sample)) else '样本的全部研报都取自该版本',
@@ -215,22 +283,22 @@ def stage_describe(c):
     from src.studies.forecast_accuracy import errors, tables
     S, D = c.load('scope.parquet', 'sample'), c.load('sample_report.parquet', 'sample')
     R = c.load('forecast_errors_rows.parquet', 'sample')
-    desc = tables.descriptive_stats(D)
+    desc = tables.descriptive_stats(D, c.xv)
     n = desc[desc.口径 == '缩尾后'].set_index('变量').N
-    print(f'  样本：RT 三个变量 {n["RT_NSRC"]} 篇，WG 三个变量 {n["WG_NSRC"]} 篇')
+    print('  样本：' + (f'{c.xv.pre} 三个变量 {n[c.xv.X6[0]]} 篇，' if c.xv.XT else '') + f'WG 三个变量 {n["WG_NSRC"]} 篇')
     es = tables.error_stats(D)
     cons = errors.consistency(D)
     med = errors.median_check(R, S).rename(columns={'口径': '窗口'}).assign(说明='M75 是否为同行绝对误差的中位数（窗口列为来源、口径、n75 奇偶）')
     fields = pd.concat([errors.consistency_fields(R, S), med], ignore_index=True)
     return [c.write(desc, 'descriptive_stats.csv'), c.write(es, 'error_stats.csv'),
             c.write(tables.table1(es), f'tables/{tables.FILES[1]}'), c.write(cons, f'tables/{tables.FILES[2]}'),
-            c.write(fields, f'tables/{tables.FIELDS_FILE}'), c.write(tables.table3(desc), f'tables/{tables.FILES[3]}')]
+            c.write(fields, f'tables/{tables.FIELDS_FILE}'), c.write(tables.table3(desc, c.xv), f'tables/{tables.FILES[3]}')]
 
 
 def stage_decomp(c):
     from src.studies.forecast_accuracy import tables
-    dec = tables.variance_decomposition(c.load('sample_report.parquet', 'sample'))
-    return [c.write(dec, 'variance_decomposition.csv'), c.write(tables.table4(dec), f'tables/{tables.FILES[4]}')]
+    dec = tables.variance_decomposition(c.load('sample_report.parquet', 'sample'), c.xv)
+    return [c.write(dec, 'variance_decomposition.csv'), c.write(tables.table4(dec, c.xv), f'tables/{tables.FILES[4]}')]
 
 
 def stage_regress(c):
@@ -243,7 +311,7 @@ def stage_regress(c):
         old = c.load('reg_all.csv', 'regress')
         print('  只重估：' + '、'.join(':'.join(k) for k in c.only))
     D, P = c.load('sample_report.parquet', 'sample'), c.load('sample_pair.parquet', 'sample')
-    reg = regressions.run_all(D, P, c.only, old)
+    reg = regressions.run_all(D, P, c.only, old, c.xv)
     print(f'  {len(reg)} 行（' + '，'.join(f'{lv} {n}' for lv, n in reg.level.value_counts(sort=False).items()) + '）')
     return [c.write(reg, 'reg_all.csv')]
 
@@ -255,18 +323,21 @@ def stage_tables(c):
     dec = c.load('variance_decomposition.csv', 'decomp')
     S, D, P = (c.load(n, 'sample') for n in ('scope.parquet', 'sample_report.parquet', 'sample_pair.parquet'))
     pl, rl = c.load('figure2_peer_lags.parquet', 'sample'), c.load('figure2_report_lags.parquet', 'sample')
-    files = [c.write(t, f'tables/{tables.FILES[k]}') for k, t in tables.reg_tables(reg).items()]
-    nums = tables.text_numbers(S, D, P, reg, desc, dec, regressions.estimation_sample(D), pl, rl, figures.schematic_numbers(),
-                               **c.src, rating_only=c.args.rating_only)
+    files = [c.write(t, f'tables/{tables.FILES[k]}') for k, t in tables.reg_tables(reg, c.xv).items()]
+    nums = tables.text_numbers(S, D, P, reg, desc, dec, regressions.estimation_sample(D), pl, rl,
+                               figures.schematic_numbers(c.args.target), **c.src, target_only=c.args.target_only, xv=c.xv)
     print(f'  表 5–13 和 {len(nums)} 个正文数字')
-    return files + [c.write(nums, f'tables/{tables.NUMBERS_FILE}')]
+    files.append(c.write(nums, f'tables/{tables.NUMBERS_FILE}'))
+    if c.xv.count:  # 目标节点可以不止一个（revenue）时另写名称频数；rating 不写，输出与原来相同
+        files.append(c.write(tables.target_nodes(S, **c.src, xv=c.xv), f'tables/{tables.NODES_FILE}'))
+    return files
 
 
 def stage_figures(c):
     from src.studies.forecast_accuracy import figures
     pl, rl = c.load('figure2_peer_lags.parquet', 'sample'), c.load('figure2_report_lags.parquet', 'sample')
     f1, f2 = c.fig_dir / figures.FIG1.name, c.fig_dir / figures.FIG2.name
-    figures.schematic(f1)
+    figures.schematic(f1, c.args.target)
     figures.peer_lag_plot(pl, rl, f2)
     return [f1, f2]
 
@@ -293,17 +364,19 @@ def run(args):
     from pathlib import Path
 
     from src.studies.forecast_accuracy import figures, regressions
+    resolve_target(args)
     parts = parse_parts(args.part)
     if args.blocks and 'regress' not in parts:
         raise SystemExit('--blocks 只用于 regress 环节：请同时给 --part regress')
-    only = regressions.parse_blocks(args.blocks) if args.blocks else None  # 先检查块名，免得跑到一半才报错
+    from src.studies.forecast_accuracy.sample import XVars
+    only = regressions.parse_blocks(args.blocks, XVars(args.target)) if args.blocks else None  # 先检查块名，免得跑到一半才报错
     t0 = time.perf_counter()
     from src import samples
     from src.graph import version_spec
     samples.spec(args.sample)
     if args.version:
         version_spec(args.version)
-    out = Path(args.output) if args.output else default_out(args.sample, args.version, args.log1p, args.rating_only)
+    out = Path(args.output) if args.output else default_out(args.sample, args.version, args.log1p, args.target, args.target_only)
     out.mkdir(parents=True, exist_ok=True)
     c = Ctx(args, out, Path(args.fig_dir) if args.fig_dir else out / figures.FIG_SUBDIR, only)
     for name in parts:

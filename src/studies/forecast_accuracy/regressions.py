@@ -31,7 +31,7 @@ Y 的窗口由列名后缀 _Hh 决定（horizon），控制的同行时滞一律
   peerlag_median      同行时滞换成中位数 LAGMED_Hm，Ym_Hm × {firm, firm+broker}
   peerlag_npeers      PEERLAG_Hm 之外再控制数据文件主变量窗口的同行条数对数 LNN_MAIN（现为 ln(n180)，LNN180_NP_Hm）
   month_fe            加发布月份固定效应，Ym_Hm × {firm+month, firm+broker+month}
-  same_sample         WG 三个变量单独放入，样本限 RT_NSRC 有定义的研报
+  same_sample         WG 三个变量单独放入，样本限 RT_NSRC 有定义的研报（--target revenue 时是 RV_NSRC，下同：RT 换成目标的前缀）
   log_sources         RT_LNSRC、WG_LNSRC 单独放入和成对放入
   excl_000858         剔除五粮液（000858）：六个 X 单独、三对成对、六个同时放入，Ym_Hm × {firm, firm+broker}
   firm_x_year         公司 × 目标年度固定效应：Ym_Hm × {firmxyear, firmxyear+broker} × 六个 X 单独放入
@@ -39,6 +39,8 @@ Y 的窗口由列名后缀 _Hh 决定（horizon），控制的同行时滞一律
   fe_steps            Ym_Hm × FE 四档 × 六个 X 单独放入
   paired              成对放入 × {firm, firm+broker}
 某个格子样本不足（src.ols.fit 没有结果，如 H3 加券商固定效应后自由度不够）时 reg_all 里没有这一行，表里写 NA。
+--target none（不用子图变量，X 只有 WG 三个）：paired、same_sample、firm_broker / paired 三块需要子图变量，不估计；log_sources
+只有 WG_LNSRC 单独放入（一个变量没有成对）；excl_000858 的“六个同时放入”变成三个 WG 同时放入；其余块照常，“六个 X”都换成三个。
 块的顺序（reg_all 的行序）同上，由 blocks() 定义；run_all(only=...) 只重估其中几块、其余行取自已有的 reg_all（命令行
 --part regress --blocks，公司-券商层面的块写成 firm_broker:fe_steps、firm_broker:paired）。
 
@@ -54,7 +56,7 @@ import pandas as pd
 from src.ols import fit
 from src.studies.forecast_accuracy.errors import ALL_Y
 from src.studies.forecast_accuracy.sample import (CTRL, DAGE_MAIN, LAG_MAIN, LAG_W, LAGMED_MAIN, LNN_MAIN, OTHER_H, OWN_MAIN,
-                                                  SCORE_MAIN, X6, XLOG, Y_MAIN, hv, ymain)
+                                                  SCORE_MAIN, XV, Y_MAIN, hv, ymain)
 
 FE_COLS = {
     'none': [], 'industry': ['sw', 'ty'], 'firm': ['code', 'ty'], 'firm+broker': ['code', 'ty', 'broker_g'],
@@ -64,7 +66,6 @@ FE_COLS = {
 FE4 = ['none', 'industry', 'firm', 'firm+broker']
 FE_FIRM = ['firm', 'firm+broker']
 FE_FIRMXYEAR = ['firmxyear', 'firmxyear+broker']
-PAIRS = [['RT_NSRC', 'WG_NSRC'], ['RT_LNPATH', 'WG_LNPATH'], ['RT_PATHLEN', 'WG_PATHLEN']]
 EXCL_CODE = '000858'  # 五粮液：FY2025 实际值待核实
 COLS = ['level', 'block', 'Y', 'fe', 'fe_cols', 'controls', 'X', 'term', 'role', 'coef', 'se', 't', 'p', 'n', 'n_clusters',
         'n_singletons', 'adj_r2', 'r2', 'k']
@@ -119,9 +120,10 @@ def estimate(level, block, data, ys, fes, xsets, controls):
     return rows
 
 
-def blocks(D, P):
-    """{(层面, 块名): 估计这一块的函数（返回 reg_all 格式的行列表）}；D、P = 两个层面的回归样本（只列块名时可以是 None）。
-    字典的顺序就是 reg_all 的行序。"""
+def blocks(D, P, xv=XV):
+    """{(层面, 块名): 估计这一块的函数（返回 reg_all 格式的行列表）}；D、P = 两个层面的回归样本（只列块名时可以是 None）；
+    xv：目标的变量名（sample.XVars，默认 rating）。字典的顺序就是 reg_all 的行序。"""
+    X6, XLOG, PAIRS, keep_defined = xv.X6, xv.XLOG, xv.PAIRS, f'{xv.pre}_NSRC_RAW'
     lag = lambda y: CTRL + [lag_of(y)]  # noqa: E731
     dage = lambda y: CTRL + [DAGE_MAIN]  # noqa: E731
     ys_main = [Y_MAIN] + [ymain(h) for h in OTHER_H]
@@ -133,26 +135,31 @@ def blocks(D, P):
             data = D if level == 'report' else P
             return estimate(level, block, data if keep is None else data[keep(data)], ys, fes, xsets, controls)
         out[(level, block)] = f
+    has = bool(xv.XT)  # 有目标对应的子图变量（--target none 时没有，需要它们的块不估计）
     add('report', 'fe_steps', ys_main, FE4, single(X6))
-    add('report', 'paired', [Y_MAIN, OWN_MAIN], FE_FIRM, joint(*PAIRS))
+    if has:
+        add('report', 'paired', [Y_MAIN, OWN_MAIN], FE_FIRM, joint(*PAIRS))
     add('report', 'definitions', ys_def, FE_FIRM, single(X6))
     add('report', 'own_measures', [OWN_MAIN, SCORE_MAIN], FE4, single(X6))
     add('report', 'no_peerlag', [Y_MAIN], FE4, single(X6), lambda y: CTRL)
     add('report', 'peerlag_median', [Y_MAIN], FE_FIRM, single(X6), lambda y: CTRL + [LAGMED_MAIN])
     add('report', 'peerlag_npeers', [Y_MAIN], FE_FIRM, single(X6), lambda y: CTRL + [LAG_MAIN, LNN_MAIN])
     add('report', 'month_fe', [Y_MAIN], ['firm+month', 'firm+broker+month'], single(X6))
-    add('report', 'same_sample', [Y_MAIN], FE_FIRM, single(X6[3:]), keep=lambda d: d.RT_NSRC_RAW.notna())
-    add('report', 'log_sources', [Y_MAIN], FE_FIRM, single(XLOG) + joint(XLOG))
+    if has:
+        add('report', 'same_sample', [Y_MAIN], FE_FIRM, single(xv.XW), keep=lambda d: d[keep_defined].notna())
+    add('report', 'log_sources', [Y_MAIN], FE_FIRM, single(XLOG) + (joint(XLOG) if len(XLOG) > 1 else []))
     add('report', 'excl_000858', [Y_MAIN], FE_FIRM, single(X6) + joint(*PAIRS, X6), keep=lambda d: d.code != EXCL_CODE)
     add('report', 'firm_x_year', [Y_MAIN], FE_FIRMXYEAR, single(X6))
     add('firm_broker', 'fe_steps', [Y_MAIN], FE4, single(X6), dage)
-    add('firm_broker', 'paired', [Y_MAIN], FE_FIRM, joint(*PAIRS), dage)
+    if has:
+        add('firm_broker', 'paired', [Y_MAIN], FE_FIRM, joint(*PAIRS), dage)
     return out
 
 
-def parse_blocks(text):
-    """--blocks 的取值 -> [(层面, 块名)]：逗号分隔，块名默认是研报层面，公司-券商层面写 firm_broker:fe_steps、firm_broker:paired。"""
-    keys = blocks(None, None)
+def parse_blocks(text, xv=XV):
+    """--blocks 的取值 -> [(层面, 块名)]：逗号分隔，块名默认是研报层面，公司-券商层面写 firm_broker:fe_steps、firm_broker:paired。
+    xv：目标的变量名（--target none 时没有 paired 等需要子图变量的块）。"""
+    keys = blocks(None, None, xv)
     out = []
     for b in filter(None, (s.strip() for s in text.split(','))):
         key = tuple(b.split(':', 1)) if ':' in b else ('report', b)
@@ -162,11 +169,11 @@ def parse_blocks(text):
     return out
 
 
-def run_all(D, P, only=None, old=None):
+def run_all(D, P, only=None, old=None, xv=XV):
     """全部回归 -> reg_all 长表（列见模块说明）。only 给出 [(层面, 块名)] 时只重估这些块，其余块的行原样取自 old（已有的
-    reg_all），行序与全部重估相同。"""
+    reg_all），行序与全部重估相同。xv：目标的变量名（sample.XVars）。"""
     parts = []
-    for key, f in blocks(D, P).items():
+    for key, f in blocks(D, P, xv).items():
         if only is None or key in only:
             parts.append(pd.DataFrame(f(), columns=COLS))
         else:

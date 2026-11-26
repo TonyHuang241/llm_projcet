@@ -9,8 +9,15 @@
   （src/samples 的 companies，hs300_deep 是 data/hs300_2024_dag_covered.csv 的 241 家）时再限定在名单里的公司。
   行序同 src.graph.load.read_table('reports', 样本)（按样本登记的版本顺序拼接，hs300_deep 是 v1 在前、v0 在后，版本内按库的
   文件行序）。回归的行序就是这个顺序（求和顺序影响浮点数的末位，所以保持不变）。
-  --rating-only（build / scope 的 rating_only=True）时在上面两条之后再限定在“投资评级”是严格汇点的研报（measure 的
+  --rating-only（build / scope 的 target_only=True、target='rating'）时在上面两条之后再限定在“投资评级”是严格汇点的研报（measure 的
   RATING_STRICT_SINK 为真；样本 hs300_full、版本 v1 时 8468 篇），行序不变；下面的券商分组和之后的一切都在这个范围内做。
+  目标（build / scope 的 target，命令行 --target，默认 rating）决定“目标对应的逻辑结构”三个变量取哪一套：rating 是 RT_*（“投资
+  评级”），revenue 是 RV_*（营收类汇点，定义见 src/measure/variables.py）；全文的 WG_* 三个不变。列名、表格里的称呼都由 XVars
+  给出，下面写 RT 的地方在 revenue 目标下换成 RV。--target-only（target_only=True）把范围限定在该目标有定义的研报（rating：
+  RATING_STRICT_SINK；revenue：HAS_REVENUE_SINK），--rating-only 就是 target='rating' 加 target_only=True。默认目标下只读入
+  RT_* 和 rating 的标记列（不读 RV_*），输出与加这个开关之前相同。
+  target='none'（NO_TARGET，命令行 --target none）：不用子图变量，逻辑结构变量只有 WG_* 三个（XVars 的 XT 为空），不读入任何
+  目标的列，范围不做目标筛选（不能和 target_only 同时用）；下面写“六个变量”的地方此时是三个，其余规则不变。
   broker_g  在研究范围（hs300_deep 是这 791 篇）里按 graph 研报表的 broker 计数，不少于 MIN_BROKER 篇的用券商名，否则记“其他”
             （门槛是篇数，不随范围大小调整）。
   sw        申万一级行业：data/market_data/industry.xlsx（Wind 导出），hs300_deep 里缺的两只按 MANUAL_INDUSTRY 补。行业表和
@@ -78,8 +85,9 @@ import pandas as pd
 
 from src.accuracy.forecasts import HORIZONS
 from src.config import DATA_DIR, DEFAULT_SAMPLE
+from src.measure.variables import DEFAULT_TARGET, TARGETS
 from src.ols import winsor
-from src.studies.forecast_accuracy import errors
+from src.studies.forecast_accuracy import NO_TARGET, errors
 
 INDUSTRY = DATA_DIR / 'market_data' / 'industry.xlsx'  # 申万一级行业（2021）、证监会门类
 MANUAL_INDUSTRY = {'600837': ('金融业', '非银金融'), '601989': ('制造业', '国防军工')}  # 行业表里没有的两只（2025 年退市）：（证监会门类，申万一级）
@@ -88,10 +96,50 @@ MIN_BROKER = 5  # 研究范围内不足这么多篇的券商并成“其他”�
 
 CTRL = ['SIZE_M', 'BM', 'MOM', 'VOL', 'ROA_T', 'LNAGE']
 PCT = ['MOM', 'VOL', 'ROA_T']  # 小数 -> %
-X6 = ['RT_NSRC', 'RT_LNPATH', 'RT_PATHLEN', 'WG_NSRC', 'WG_LNPATH', 'WG_PATHLEN']
-XLOG = ['RT_LNSRC', 'WG_LNSRC']  # ln(源点数)，稳健性检验用
-NPATHS = ['RT_N_PATHS', 'WG_N_PATHS']  # 路径条数（取对数之前），只用于描述性统计
-LOG1P_X = ['RT_NSRC', 'RT_PATHLEN', 'WG_NSRC', 'WG_PATHLEN']  # --log1p 时换成 ln(1 + 原始值) 的列（*_LNPATH 已是 ln(1 + 路径数)）
+
+
+class XVars:
+    """逻辑结构变量的列名和称呼，随目标（--target，src/measure/variables.py 的 TARGETS 的键，或 NO_TARGET = 'none'）变：目标
+    对应的三个变量用该目标的列名前缀（rating 是 RT_*，revenue 是 RV_*），全文的三个变量总是 WG_*。属性：
+      target、pre（列名前缀）、sym（文档符号前缀 Rate / Rev）、doc（表格里的称呼）、short（简称）、match（概念名称判定）、
+      defined（measure 里“有定义”的标记列，--target-only 用）、flags（scope 一并读入的标记列）；
+      XT     目标对应的三个变量（none 时为空）；XW 全文的三个变量 WG_*
+      X6     全部逻辑结构变量 = XT + XW（一般是六个，none 时只有 WG 三个，名字沿用）
+      XLOG   ln(源点数)，稳健性检验用
+      NPATHS 路径条数（取对数之前），只用于描述性统计
+      LOG1P_X --log1p 时换成 ln(1 + 原始值) 的列（*_LNPATH 已是 ln(1 + 路径数)）
+      PAIRS  成对放入的三对 [目标变量, WG 同名变量]（none 时为空）
+      label  各变量的文档符号（RateSrc …… AllLen）；group 各变量所属逻辑结构的称呼（表格用）；
+      text   text_numbers.csv 里描述这个目标的几句话（TARGETS 的 text）；
+      focus、fpre、fsym  text_numbers 逐一报告稳健性数字的三个变量及其列名前缀、符号前缀：有目标时是 XT（RT、Rate 等），
+             none 时是 XW（WG、All）。
+    none 时 pre、sym、doc、short、match、defined、text、count、nodes 都是 None，flags 为空（用到它们的地方都按 XT 为空跳过）。"""
+
+    def __init__(self, target=DEFAULT_TARGET):
+        if target == NO_TARGET:
+            t = dict.fromkeys(('prefix', 'symbol', 'doc', 'short', 'match', 'defined', 'text', 'count', 'nodes'), None)
+            t['flags'] = []
+        else:
+            t = TARGETS[target]
+        p, s = t['prefix'], t['symbol']
+        self.target, self.pre, self.sym, self.doc, self.short = target, p, s, t['doc'], t['short']
+        self.match, self.defined, self.flags, self.text = t['match'], t['defined'], list(t['flags']), t['text']
+        self.count, self.nodes = t['count'], t['nodes']  # 目标节点个数的列（rating 为 None）、取目标节点集合的函数
+        has = p is not None
+        self.XT = [f'{p}_NSRC', f'{p}_LNPATH', f'{p}_PATHLEN'] if has else []
+        self.XW = ['WG_NSRC', 'WG_LNPATH', 'WG_PATHLEN']
+        self.X6 = self.XT + self.XW
+        self.XLOG = ([f'{p}_LNSRC'] if has else []) + ['WG_LNSRC']
+        self.NPATHS = ([f'{p}_N_PATHS'] if has else []) + ['WG_N_PATHS']
+        self.LOG1P_X = ([f'{p}_NSRC', f'{p}_PATHLEN'] if has else []) + ['WG_NSRC', 'WG_PATHLEN']
+        self.PAIRS = [[a, b] for a, b in zip(self.XT, self.XW)]
+        self.label = dict(zip(self.X6, ([f'{s}Src', f'{s}Path', f'{s}Len'] if has else []) + ['AllSrc', 'AllPath', 'AllLen']))
+        self.group = {x: self.doc if x in self.XT else '全文逻辑结构' for x in self.X6}
+        self.focus, self.fpre, self.fsym = (self.XT, p, s) if has else (self.XW, 'WG', 'All')
+
+
+XV = XVars()  # 默认目标（rating）；下面四个常量是它的列名，供不区分目标的地方使用
+X6, XLOG, NPATHS, LOG1P_X = XV.X6, XV.XLOG, XV.NPATHS, XV.LOG1P_X
 
 MAIN_H = 2  # 主窗口（第 h 年预测）：研究层唯一决定主窗口的常量，下面的变量名都由它派生
 OTHER_H = [h for h in HORIZONS if h != MAIN_H]  # 表 6 的其他窗口（Panel A、B 依次）
@@ -165,45 +213,51 @@ def load_industry(path=INDUSTRY):
 
 
 # ---------------------------------------------------------------- 研究范围
-def scope(log1p=False, sample=DEFAULT_SAMPLE, version=None, rating_only=False):
+def scope(log1p=False, sample=DEFAULT_SAMPLE, version=None, target_only=False, target=DEFAULT_TARGET):
     """研究范围的研报（hs300_deep、v1 时 791 篇；行序同 graph 研报表），合并 accuracy 的全部列和 measure 的六个变量、两个路径
-    条数的原始值（列名同上游，未缩尾；路径条数转成 float）；另加 broker_g、sw、month。log1p=True 时 LOG1P_X 四列换成
-    ln(1 + 原始值)。sample、version：从哪个样本、哪个抽取版本读上游成品（version 见 src/samples 的 assignment）。
-    rating_only=True（--rating-only）时再限定在 measure 的 RATING_STRICT_SINK 为真的研报（在券商计数之前限定）。"""
+    条数的原始值（列名同上游，未缩尾；路径条数转成 float）和目标的标记列；另加 broker_g、sw、month。log1p=True 时 LOG1P_X
+    四列换成 ln(1 + 原始值)。sample、version：从哪个样本、哪个抽取版本读上游成品（version 见 src/samples 的 assignment）。
+    target：目标（TARGETS 的键），决定目标对应的三个变量和标记列取哪一套（rating：RT_*、HAS_RATING_NODE、RATING_STRICT_SINK；
+    revenue：RV_*、N_REVENUE_SINKS、HAS_REVENUE_SINK），其他目标的列不读入。
+    target_only=True（--target-only；--rating-only 即 target='rating'）时再限定在该目标有定义（measure 的 defined 标记列为真，
+    rating 是 RATING_STRICT_SINK、revenue 是 HAS_REVENUE_SINK）的研报（在券商计数之前限定）。"""
     from src import samples
     from src.accuracy.load import report_accuracy
     from src.graph.load import read_table
     from src.measure.load import read_measures
 
+    xv = XVars(target)
     r = read_table('reports', sample, columns=['stock_code', 'date', 'broker', 'n_edges'], version=version)
     r = r.assign(code=r.stock_code.str[:6])
     companies = samples.spec(sample)['companies']
     covered = r.code.isin(set(pd.read_csv(companies, dtype=str).stock_code.str[:6])) if companies else True
     r = r[covered & (r.n_edges > 0)].reset_index(drop=True)
-    if rating_only:
-        ss = read_measures(['RATING_STRICT_SINK'], sample=sample, version=version)
-        r = r[r.report_id.isin(set(ss.report_id[ss.RATING_STRICT_SINK.astype(bool)]))].reset_index(drop=True)
+    if target_only:
+        ss = read_measures([xv.defined], sample=sample, version=version)
+        r = r[r.report_id.isin(set(ss.report_id[ss[xv.defined].astype(bool)]))].reset_index(drop=True)
     bc = r.broker.value_counts()
     r['broker_g'] = np.where(r.broker.map(bc) >= MIN_BROKER, r.broker, '其他')
     r['sw'] = r.code.map(load_industry().set_index('code').sw)
     r['month'] = r.date.str[:4] + '-' + r.date.str[4:6]
     acc = report_accuracy(sample=sample).drop(columns=['code', 'date', 'broker'])
-    meas = read_measures(X6 + NPATHS + ['HAS_RATING_NODE', 'RATING_STRICT_SINK'], sample=sample, version=version)
-    meas[NPATHS] = meas[NPATHS].astype(float)
+    meas = read_measures(xv.X6 + xv.NPATHS + xv.flags, sample=sample, version=version)
+    meas[xv.NPATHS] = meas[xv.NPATHS].astype(float)
     if log1p:
-        meas[LOG1P_X] = np.log1p(meas[LOG1P_X])
+        meas[xv.LOG1P_X] = np.log1p(meas[xv.LOG1P_X])
     S = (r[['report_id', 'code', 'date', 'month', 'broker', 'broker_g', 'sw', 'n_edges']]
          .merge(acc, on='report_id', how='left', validate='1:1').merge(meas, on='report_id', how='left', validate='1:1'))
     assert S.base.notna().all() and S.WG_NSRC.notna().all(), '研究范围内有研报不在 accuracy / measure 的成品里'
-    if rating_only:
-        assert S.RATING_STRICT_SINK.astype(bool).all() and S.RT_NSRC.notna().all(), '--rating-only 的范围内有 RT_* 缺失的研报'
+    if target_only:
+        assert S[xv.defined].astype(bool).all() and S[xv.X6[0]].notna().all(), f'--target-only 的范围内有 {xv.pre}_* 缺失的研报'
     S['base'] = S.base.astype(bool)
     return S
 
 
 # ---------------------------------------------------------------- 研报层面
-def report_sample(S, rows):
-    """研报层面的回归样本（786 篇基础样本，行序同 S；口径见模块说明）。rows = errors.read_rows 读出的数据文件行。"""
+def report_sample(S, rows, xv=XV):
+    """研报层面的回归样本（786 篇基础样本，行序同 S；口径见模块说明）。rows = errors.read_rows 读出的数据文件行；
+    xv：目标的变量名（XVars）。"""
+    X6, XLOG, NPATHS = xv.X6, xv.XLOG, xv.NPATHS
     D = S[S.base].reset_index(drop=True)
     W = errors.wide(rows, D[['report_id', 'code']])
     assert (W.report_id.to_numpy() == D.report_id.to_numpy()).all()
@@ -238,9 +292,11 @@ def winsor_by(df, cols, universe):
     return bounds
 
 
-def pair_sample(S, rows, sample=DEFAULT_SAMPLE):
-    """公司-券商层面的回归样本（760 对，按 code、ORG_CL 排序；口径见模块说明）。rows = errors.read_rows 读出的数据文件行。"""
+def pair_sample(S, rows, sample=DEFAULT_SAMPLE, xv=XV):
+    """公司-券商层面的回归样本（760 对，按 code、ORG_CL 排序；口径见模块说明）。rows = errors.read_rows 读出的数据文件行；
+    xv：目标的变量名（XVars）。"""
     from src.accuracy.load import pair_accuracy
+    X6 = xv.X6
 
     s = S[S.ORG_CL.notna()]
     bg = s.groupby('ORG_CL').broker_g.agg(lambda x: x.value_counts().index[0])
@@ -275,10 +331,11 @@ def pair_sample(S, rows, sample=DEFAULT_SAMPLE):
     return P[cols]
 
 
-def build(log1p=False, sample=DEFAULT_SAMPLE, version=None, rating_only=False):
-    """(研究范围 791 篇, 研报层面样本, 公司-券商层面样本, 数据文件里用到的行)。log1p 见模块说明；sample、version、rating_only
-    同 scope。数据文件的行 = report_id 属于研究范围或公司-券商层面被评价预测（EVAL_RPT_ID_H{MAIN_H}）的全部行（不管 sec）。"""
+def build(log1p=False, sample=DEFAULT_SAMPLE, version=None, target_only=False, target=DEFAULT_TARGET):
+    """(研究范围 791 篇, 研报层面样本, 公司-券商层面样本, 数据文件里用到的行)。log1p 见模块说明；sample、version、target_only、
+    target 同 scope。数据文件的行 = report_id 属于研究范围或公司-券商层面被评价预测（EVAL_RPT_ID_H{MAIN_H}）的全部行（不管 sec）。"""
     from src.accuracy.load import pair_accuracy
-    S = scope(log1p, sample, version, rating_only)
+    xv = XVars(target)
+    S = scope(log1p, sample, version, target_only, target)
     rows = errors.read_rows(set(S.report_id) | set(pair_accuracy(columns=[hv('EVAL_RPT_ID')], sample=sample)[hv('EVAL_RPT_ID')].dropna()))
-    return S, report_sample(S, rows), pair_sample(S, rows, sample), rows
+    return S, report_sample(S, rows, xv), pair_sample(S, rows, sample, xv), rows
